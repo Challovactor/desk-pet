@@ -11,8 +11,8 @@
  * 与板级绑定不同，所以初始化后必须覆盖 pinmux（见 app_sd_pins()）。
  *
  * 传输策略：
- *   - 命令/令牌/短数据用 CPU 轮询（drv_spi_master_transmit_by_cpu）；
- *   - 512 字节块用 DMA（drv_spi_master_transmit_by_dma），避免长时间关中断。
+ *   - 由于 SDK SPI1 的 CPU/DMA 全双工路径在这块板上不可用，改用 GPIO 位翻转
+ *     软件 SPI（约 0.5-1 MHz），时序完全可控。
  */
 #include "app_config.h"
 #include "app_sdspi.h"
@@ -35,131 +35,115 @@
 #define SD_DATA_RESP_OK      0x05u
 
 static os_mutex_handle_t s_lock;
-static os_sem_handle_t   s_spi_done;
-static spi_device_interface_config_t s_cfg;
 static int s_ready;
-static int s_spi_inited;
 static int s_block_addressed;
 static uint32_t s_sectors;
 
 static uint8_t s_tx_ff[SD_SECTOR_SIZE] __attribute__((aligned(4)));
-static uint8_t s_rx_scratch[SD_SECTOR_SIZE] __attribute__((aligned(4)));
 static uint8_t s_cmd_tx[8] __attribute__((aligned(4)));
 static uint8_t s_cmd_rx[8] __attribute__((aligned(4)));
 
 /* ---------------------------------------------------------------- 底层 SPI */
+/* SDK 的 SPI1 CPU 全双工路径在这块板上实测 RX 晚 1 bit（R7 由 01 AA 变成
+ * 00 D5），DMA 路径对短传输无响应。这里改用 GPIO 位翻转软件 SPI，时序
+ * 完全可控；速率约 0.5-1 MHz，足够 64 KB/s 录音和片段上传。 */
 
 static unsigned s_cs_gpio = APP_SD_CS_GPIO;
+static unsigned s_sck_gpio = APP_SD_CLK_GPIO;
+static unsigned s_mosi_gpio = APP_SD_MOSI_GPIO;
+static unsigned s_miso_gpio = APP_SD_MISO_GPIO;
 
 static void sd_select(int on)
 {
     drv_gpio_write(s_cs_gpio, on ? 0u : 1u);
 }
 
-/* 按一组候选映射配置 SPI1 四根线：CS 用 GPIO 软件片选，其余走 SPI1 复用。 */
-static void sd_config_pins(unsigned cs, unsigned sck, unsigned mosi, unsigned miso)
+static void sd_delay(void)
 {
-    T_GPIO_CONFIG cs_cfg;
-
-    set_pin_function(cs, FUNC_GPIO);
-    /* drv_gpio_open() 是全工程唯一使能 CLK_GPIO 的入口；不调用它，
-     * drv_gpio_write/set_dir 对 CS 无效。 */
-    memset(&cs_cfg, 0, sizeof(cs_cfg));
-    cs_cfg.num = (unsigned char)cs;
-    cs_cfg.dir = DRV_GPIO_ARG_DIR_OUT;
-    cs_cfg.intr_type = DRV_GPIO_ARG_INTR_MODE_NOP;
-    cs_cfg.pull_type = DRV_GPIO_ARG_PULL_UP;
-    if (drv_gpio_open(&cs_cfg) != GPIO_RET_SUCCESS) {
-        os_printf(LL_ERR, "[sd] gpio open CS=%u failed\r\n", cs);
+    for (volatile unsigned i = 0; i < 8u; ++i) {
     }
-    drv_gpio_write(cs, 1u);
-
-    set_pin_function(sck, FUNC_SPI1_CLK);
-    set_pin_function(mosi, FUNC_SPI1_MOSI);
-    set_pin_function(miso, FUNC_SPI1_MISO);
-
-    chip_io_drive_current(sck, CHIP_IO_DRIVE_CURRENT_2mA);
-    chip_io_drive_current(mosi, CHIP_IO_DRIVE_CURRENT_2mA);
-    chip_io_drive_current(miso, CHIP_IO_DRIVE_CURRENT_2mA);
-
-    s_cs_gpio = cs;
 }
 
-static void spi_done_cb(void *arg)
+static uint8_t bb_byte(uint8_t out)
 {
-    (void)arg;
-    if (s_spi_done) {
-        os_sem_post(s_spi_done);
+    uint8_t in = 0;
+
+    for (int b = 7; b >= 0; --b) {
+        drv_gpio_write(s_mosi_gpio, (out >> b) & 1u);
+        drv_gpio_write(s_sck_gpio, 1u);
+        sd_delay();
+        {
+            unsigned v = 0;
+            (void)drv_gpio_read(s_miso_gpio, &v);
+            in = (uint8_t)((in << 1) | (v & 1u));
+        }
+        drv_gpio_write(s_sck_gpio, 0u);
+        sd_delay();
     }
+    return in;
+}
+
+/* 按一组候选映射配置 4 根 GPIO：CS/SCK/MOSI 输出，MISO 输入上拉。 */
+static void sd_config_pins(unsigned cs, unsigned sck, unsigned mosi, unsigned miso)
+{
+    T_GPIO_CONFIG cfg;
+
+    set_pin_function(cs, FUNC_GPIO);
+    set_pin_function(sck, FUNC_GPIO);
+    set_pin_function(mosi, FUNC_GPIO);
+    set_pin_function(miso, FUNC_GPIO);
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.dir = DRV_GPIO_ARG_DIR_OUT;
+    cfg.intr_type = DRV_GPIO_ARG_INTR_MODE_NOP;
+    cfg.pull_type = DRV_GPIO_ARG_PULL_UP;
+
+    cfg.num = (unsigned char)cs;   (void)drv_gpio_open(&cfg); drv_gpio_write(cs, 1u);
+    cfg.num = (unsigned char)sck;  (void)drv_gpio_open(&cfg); drv_gpio_write(sck, 0u);
+    cfg.num = (unsigned char)mosi; (void)drv_gpio_open(&cfg); drv_gpio_write(mosi, 1u);
+
+    cfg.dir = DRV_GPIO_ARG_DIR_IN;
+    cfg.pull_type = DRV_GPIO_ARG_PULL_UP;
+    cfg.num = (unsigned char)miso; (void)drv_gpio_open(&cfg);
+
+    s_cs_gpio = cs;
+    s_sck_gpio = sck;
+    s_mosi_gpio = mosi;
+    s_miso_gpio = miso;
+    chip_io_drive_current(sck, CHIP_IO_DRIVE_CURRENT_2mA);
+    chip_io_drive_current(mosi, CHIP_IO_DRIVE_CURRENT_2mA);
 }
 
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned int len)
 {
-    spi_trans_t tr;
-    unsigned int xlen;
-    int rc;
-
-    if (len == 0u) {
-        return 0;
-    }
-    memset(&tr, 0, sizeof(tr));
-    tr.txlength = len;
-    tr.rxlength = len;
-    tr.tx_buffer = (unsigned int *)tx;
-    tr.rx_buffer = (unsigned int *)rx;
-    tr.config = &s_cfg;
-
-    if (len <= 32u) {
-        /* CPU 路径只识别 TX/RX/TX_RX/RX_TX；FULL_DUPLEX 位在 by_cpu 里
-         * 没有分支，会静默变成空操作。 */
-        tr.flags = SPI_TRANS_MODE_TX_RX | SPI_TRANS_VARIABLE_CONFIG;
-        rc = drv_spi_master_transmit_by_cpu(E_SPI_NUM_1, &tr);
-        return rc == SPI_RET_SUCCESS ? 0 : -1;
-    }
-
-    xlen = (len + 3u) & ~3u;
-    memset(&tr, 0, sizeof(tr));
-    tr.flags = SPI_TRANS_MODE_FULL_DUPLEX | SPI_TRANS_VARIABLE_CONFIG;
-    tr.txlength = xlen;
-    tr.rxlength = xlen;
-    tr.tx_buffer = (unsigned int *)tx;
-    tr.rx_buffer = (unsigned int *)rx;
-    tr.config = &s_cfg;
-
-    while (os_sem_wait(s_spi_done, 0) == 0) {
-        /* drain */
-    }
-    tr.callback.spi_callback = spi_done_cb;
-    tr.callback.spi_data = NULL;
-    rc = drv_spi_master_transmit_by_dma(E_SPI_NUM_1, &tr);
-    if (rc != SPI_RET_SUCCESS) {
-        return -1;
-    }
-    if (os_sem_wait(s_spi_done, 1000) != 0) {
-        return -1;
+    for (unsigned i = 0; i < len; ++i) {
+        uint8_t b = bb_byte(tx ? tx[i] : 0xFFu);
+        if (rx) {
+            rx[i] = b;
+        }
     }
     return 0;
 }
 
 static uint8_t spi_byte(uint8_t out)
 {
-    uint8_t tx[4] __attribute__((aligned(4))) = {out, 0xFFu, 0xFFu, 0xFFu};
-    uint8_t rx[4] __attribute__((aligned(4))) = {0xFFu, 0xFFu, 0xFFu, 0xFFu};
-
-    if (spi_xfer(tx, rx, 1u) != 0) {
-        return 0xFFu;
-    }
-    return rx[0];
+    return bb_byte(out);
 }
 
 static int spi_tx_block(const uint8_t *data, unsigned int len)
 {
-    return spi_xfer(data, s_rx_scratch, len);
+    for (unsigned i = 0; i < len; ++i) {
+        (void)bb_byte(data[i]);
+    }
+    return 0;
 }
 
 static int spi_rx_block(uint8_t *data, unsigned int len)
 {
-    return spi_xfer(s_tx_ff, data, len);
+    for (unsigned i = 0; i < len; ++i) {
+        data[i] = bb_byte(0xFFu);
+    }
+    return 0;
 }
 
 /* -------------------------------------------------------------------- CRC */
@@ -322,45 +306,8 @@ int app_sd_init(void)
             return -1;
         }
     }
-    if (s_spi_done == NULL) {
-        s_spi_done = os_sem_create(1, 0);
-        if (s_spi_done == NULL) {
-            return -1;
-        }
-    }
-
-    if (!s_spi_inited) {
-        if (drv_spi_master_init(E_SPI_NUM_1, 1) != 0) {
-            os_printf(LL_ERR, "[sd] spi init failed\r\n");
-            return -1;
-        }
-        /* init 成功即标记，避免后续步骤失败重试时二次 init 返回 EBUSY */
-        s_spi_inited = 1;
-
-        /* 初始化时钟：AHB 80MHz / (2*(255+1)) = 156kHz，满足 SD 卡 ≤400kHz */
-        memset(&s_cfg, 0, sizeof(s_cfg));
-        s_cfg.flags = SPI_DEVICE_CLK_AHB;
-        s_cfg.command_bits = SPI_COMMAND_BIT0;
-        s_cfg.address_bits = 0;
-        s_cfg.dummy_bits = 0;
-        s_cfg.trans_mode = SPI_TRAMODE_WRCON;
-        s_cfg.mode = 1;   /* 实测 mode0 下 RX 晚 1 bit；试 CPHA 相反 */
-        s_cfg.sclk_div = 255;
-
-        /* drv_spi_master_init 只做复位/时钟/引脚，不配置时序与 SPI 模式；
-         * 必须显式调用 transmit_config，否则 sclk_div 保持默认值（过快）。 */
-        if (spi_master_transmit_config(E_SPI_NUM_1, &s_cfg) != SPI_RET_SUCCESS) {
-            os_printf(LL_ERR, "[sd] spi config failed\r\n");
-            return -1;
-        }
-    } else {
-        /* 重试时只重做卡协议，回到慢速时钟 */
-        s_cfg.sclk_div = 255;
-        (void)spi_master_transmit_config(E_SPI_NUM_1, &s_cfg);
-    }
-
-    /* 板级端口表没有给出信号顺序，而数据手册允许 SPI1 复用到任意 GPIO0-24。
-     * 依次尝试 4 种最可能的机械连接，CMD0 返回 0x01 即命中。 */
+    /* 板级端口表没有给出信号顺序；软件 SPI 不受硬件复用限制，依次尝试
+     * 4 种最可能的机械连接，CMD0 返回 0x01/0x00 即命中。 */
     {
         static const struct {
             unsigned cs, sck, mosi, miso;
@@ -506,13 +453,6 @@ int app_sd_init(void)
 
     if (s_sectors == 0u) {
         os_printf(LL_ERR, "[sd] zero capacity\r\n");
-        return -1;
-    }
-
-    /* 提速：80MHz / (2*(3+1)) = 10MHz（SPI 模式下 SD 卡通常支持 25MHz） */
-    s_cfg.sclk_div = 3;
-    if (spi_master_transmit_config(E_SPI_NUM_1, &s_cfg) != SPI_RET_SUCCESS) {
-        os_printf(LL_ERR, "[sd] spi fast config failed\r\n");
         return -1;
     }
 

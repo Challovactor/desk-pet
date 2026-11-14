@@ -430,6 +430,34 @@ static int net_wifi_connect(void)
     }
 }
 
+/* 上板诊断：扫描并打印实际看到的 AP 列表，用于判断射频/天线是否工作。 */
+static void net_scan_debug(void)
+{
+    wifi_scan_config_t cfg;
+    int n;
+
+    memset(&cfg, 0, sizeof(cfg));
+    os_printf(LL_INFO, "[net] scanning APs...\r\n");
+    if (sys_wifi_scan_start(false, &cfg) != SYS_OK) {
+        os_printf(LL_ERR, "[net] scan start failed\r\n");
+        return;
+    }
+    for (int i = 0; i < 25 && sys_wifi_scan_get_count() <= 0; ++i) {
+        os_msleep(200);
+    }
+    n = sys_wifi_scan_get_count();
+    os_printf(LL_INFO, "[net] scan found %d AP(s)\r\n", n);
+    for (int i = 0; i < n && i < 10; ++i) {
+        wifi_info_t info;
+        memset(&info, 0, sizeof(info));
+        if (sys_wifi_scan_get_result((unsigned int)i, &info) == SYS_OK) {
+            os_printf(LL_INFO, "[net]  '%s' ch=%d rssi=%d\r\n",
+                      (char *)info.ssid, (int)info.channel, (int)info.rssi);
+        }
+    }
+    (void)sys_wifi_scan_stop();
+}
+
 static void net_task(void *arg)
 {
     long long last_restart = 0;
@@ -446,6 +474,8 @@ static void net_task(void *arg)
     (void)sys_wifi_sta_set_auto_connect(false);
     (void)sys_wifi_sta_stop();
     os_msleep(300);
+
+    net_scan_debug();
 
     last_restart = os_time_get();
     (void)net_wifi_connect();
