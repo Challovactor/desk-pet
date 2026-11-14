@@ -11,9 +11,9 @@
 | F407 调试串口 | USART3（PB10=TX / PB11=RX） | F407 本板日志，115200 8N1，不跨板 | — |
 | MIC 连接器 | ECW6700 BOARD_I2S_0（WS=IO6 / SCK=IO7 / SD=IO8，5 线：3V3/WS/SCK/SD/GND） | PDM 数字麦克风，32 kHz；第 4 脚 IO3 保留 MCLK | — |
 | SPK-OUT | ECW6700 板载 codec/功放（ES8311）输出 | 喇叭；回放数据经 MIC 连接器 I2S 线送板载 codec（半双工，回放时暂停采集） | — |
-| SD 卡 | ECW6700 SPI：SCK=IO14 / MISO=IO12 / MOSI=IO13 / CS=IO11 | SPI 模式裸扇区环形缓冲，从 LBA 2048 起 | 10 MHz |
+| SD 卡 | ECW6700 IO14(SCK) / IO12(MISO) / IO13(MOSI) / IO11(CS) | **软件 SPI**（GPIO 位翻转）SPI 模式裸扇区环形缓冲，从 LBA 2048 起 | 约 0.5–1 MHz |
 | TTS | ECW6700 UART（模组自有引脚） | 文本转语音模块，保留接法，固件暂未驱动 | — |
-| 2.0TP | F407 I2C3（PA8=SCL / PC9=SDA，RESET=PD15，INT=PD10 轮询不用） | CST816D 触摸屏，7 位地址 0x15 | — |
+| 2.0TP | F407 I2C3（PA8=SCL / PC9=SDA，RESET=PD15，INT=PD10 轮询不用） | CST816D 触摸屏，7 位地址 0x15；模组 LCD 引脚见 §1，当前只上电不驱动 | — |
 | 4.2EPD | F407 侧接口 | 4.2" 墨水屏接口保留（硬件在位），固件暂不驱动 | — |
 
 **为什么音频不过板：** 录音（PDM 采集）、存储（SD 环形区）、上传（Wi-Fi HTTP）、
@@ -28,7 +28,11 @@ PB10/PB11 现在是 F407 的调试串口，不再承载音频。
 | 触摸 SCL | PA8 | I2C3 | CST816D，7 位地址 0x15 |
 | 触摸 SDA | PC9 | I2C3 | 寄存器 0x01 读 6 字节 |
 | 触摸 RESET | PD15 | GPIO 输出 | |
-| 触摸 INT | PD10 | 轮询，不用中断 | |
+| 触摸 INT | PD10 | 输入上拉 | 轮询，不用中断 |
+| 模组背光 BLK | PD14 | GPIO 输出 | 高有效，启动时拉高 |
+| LCD 复位 S_RES | PA11 | GPIO 输出 | 高有效 |
+| LCD CS / DC | PC11 / PC13 | GPIO 输出 | 输出高 |
+| LCD SPI SCK / MOSI | PC10 / PC12 | SPI3（AF6） | 2.0TP 模组 LCD，当前只上电不驱动画面 |
 | 板间 SCL | PB8 | I2C1 主机，100 kHz | 接 ECW6700 IO24 |
 | 板间 SDA | PB9 | I2C1 主机 | 接 ECW6700 IO23 |
 | 调试串口 TX | PB10 | USART3_TX | 115200 8N1 |
@@ -45,7 +49,7 @@ ECW 侧 `drv_i2c_slave_open` 用未左移的 7 位地址 `0x42`。
 | I2C SCL / SDA | IO24 / IO23 | 从机，地址 0x42（7 位），接 F407 PB8 / PB9 |
 | 麦克风 | MIC 连接器（BOARD_I2S_0） | PDM 数字麦：时钟 SCK=IO7，数据 SD=IO8，WS=IO6（主机驱动、麦克风不用） |
 | 喇叭 | 独立 SPK-OUT 口 | 板载 ES8311 codec + 功放输出；回放数字线与麦克风共用 MIC 连接器 I2S 线 |
-| SD 卡 | SPI：IO14/IO12/IO13 + CS=IO11 | SPI 模式，CMD17/24，512B 扇区 |
+| SD 卡 | 背面 SD 卡槽：IO14/IO12/IO13 + CS=IO11 | 软件 SPI（GPIO 位翻转），CMD17/24，512B 扇区 |
 | TTS 模块 | 模组自有 UART | 保留接法，发文本即播报；固件暂未驱动 |
 
 **共地是必须的**，两块板各自的 GND 必须连一起，否则 I²C 可能偶发丢包

@@ -38,11 +38,18 @@
                                                     │
                                         板间 I²C（PB8/PB9 ↔ ECW IO24/IO23）
                                                     │
-ECW6700F（YL6700B）: MIC 接口 + 背面 SPI SD 卡槽 + Wi-Fi 天线 + 喇叭
+ECW6700F（YL6700B）: MIC 接口 + 背面 SD 卡槽 + Wi-Fi 天线 + 喇叭（独立 SPK-OUT 口）
 ```
 
+- **ECW6700F**（YL6700B）外设接口：MIC 连接器（PDM 数字麦）、独立 SPK-OUT 口接喇叭
+  （板载 ES8311 codec + 功放，回放数字线与麦克风共用 MIC 连接器 I2S 线）、
+  SPI 接 SD 卡、UART 预留 TTS 语音合成模块（固件暂未驱动）；
+  蓝牙为芯片自带能力，当前固件未驱动。
+- **STM32F407**（2.0TP 模组）：CST816D 触摸走 I²C3；4.2EPD 墨水屏接口保留（硬件在位，
+  固件暂不驱动）。
 - 板上拨动开关只切换 CH340 接到哪块板的 UART（ECW 或 STM32）；板间 I²C 不受影响。
-- 2.0TP 与 ECW 的完整引脚表见 [docs/06-ecw-bringup-2026-11-15.md](docs/06-ecw-bringup-2026-11-15.md) 第 2 节。
+- 2.0TP 与 ECW 的完整引脚表见 [docs/06-ecw-bringup-2026-11-15.md](docs/06-ecw-bringup-2026-11-15.md) 第 2 节，
+  接线与检查清单见 [docs/01-wiring.md](docs/01-wiring.md)。
 
 ---
 
@@ -70,6 +77,7 @@ STM32 写 0x03 → ECW 暂停采集 → I2S TX 回放最近 N 秒 → 恢复采�
 |---|---|
 | `ecw6700/` | ECW6700F 固件：采集、SD、环形存储、I²C 从机、喇叭回放、Wi-Fi/HTTP |
 | `stm32f407/` | STM32F407 固件：CST816D 触摸、I²C 主机事件、调试串口 |
+| `docs/01-wiring.md` | 接线与硬件：总线分工、两板引脚表、检查清单 |
 | `docs/06-ecw-bringup-2026-11-15.md` | 当前版本的架构、引脚、构建烧录、排障记录 |
 | `docs/README.md` | 文档索引 |
 | `AGENT.md` | 给 AI/自动化代理的项目工作指南 |
