@@ -1,7 +1,8 @@
 /*
  * 喇叭回放（ECW6700F，BOARD_I2S_0 / MIC_SPEAKER 接口）
  *
- * 喇叭与 PDM 麦克风共用 MIC 连接器的 3 根 I2S 线（WS=IO6 / SCK=IO7 / SD=IO8），
+ * 喇叭经模块上独立的 SPK-OUT 口出声（板载 ES8311 codec + 功放）；回放的
+ * I2S 数字线与 PDM 麦克风共用 MIC 连接器（WS=IO6 / SCK=IO7 / SD=IO8），
  * 数据线半双工：播放时暂停采集，把 SD 环形区里最近 APP_CLIP_SECONDS 秒的
  * PCM16LE 单声道 32kHz 从 I2S TX 送出（复制成立体声），结束后恢复采集。
  *

@@ -15,8 +15,9 @@ STM32 --I2C 从机 0x42 收到 0x01（触摸）───────────
 - 没有蓝牙、没有墨水屏；
 - STM32 只发 1 字节触摸命令，ECW 作 I²C 从机接收；
 - 录音持续写入 SD 环形区，触摸时回溯最近 `APP_CLIP_SECONDS` 秒；
-- 喇叭与麦克风共用 MIC 连接器的 I2S 线（半双工）：STM32 发 `0x03` 时暂停采集，
-  把最近 N 秒录音从 I2S TX 回放到喇叭，播完自动恢复采集；
+- 喇叭经模块上独立的 SPK-OUT 口出声（板载 codec/功放）；回放的 I2S 数字线与麦克风
+  共用 MIC 连接器（半双工）：STM32 发 `0x03` 时暂停采集，
+  把最近 N 秒录音从 I2S TX 回放，播完自动恢复采集；
 - Wi-Fi STA 连接由本应用接管（关闭 SDK 的 NV 自动连接）；
 - 服务器先按可配置 HTTP 实现，协议隔离在 `app_net.c`。
 
@@ -156,7 +157,8 @@ C:/moce/MOCEWorkbench-data/tools/ecw6700-windows/flash/eswin_tool.exe \
    **本配置假设 SCK 为 PDM 时钟**；若上板无数据，先把 `RXWS`/`RXSCK` 两个值互换，
    并用示波器确认 IO7 上有约 2.048MHz 的连续时钟。
 3. **PDM 位序**：32-bit slot 按 MSB-first 解码；用已知音调确认波形不反转、采样率约 32kHz。
-4. **回放 TXD 复用**：喇叭与麦克风共用 MIC 连接器 SD 线（IO8）。回放把 IO8 切到
+4. **回放 TXD 复用**：回放数据线与麦克风共用 MIC 连接器 SD 线（IO8），喇叭经模块上
+   独立的 SPK-OUT 口出声（板载 ES8311 codec + 功放）。回放把 IO8 切到
    `FUNC_I2S_TXD`（时钟仍走 RXSCK/RXWS 引脚，主机模式下由控制器驱动）。若喇叭无声，
    先用示波器确认 IO8 上有发送数据、IO7 上有 32kHz×64 位率的连续时钟；TXD 若无法
    复用 IO8，需要改从 SDK 默认 TXD 引脚（IO15/IO25 等）单独接线到功放输入。
