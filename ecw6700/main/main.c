@@ -8,6 +8,7 @@
  * 数据流：
  *   MIC(I2S) -> PDM 解码 -> PCM16 -> SD 裸扇区环形区（持续写）
  *   触摸(I2C 从机 0x42) -> 取最近 APP_CLIP_SECONDS 秒 -> POST 事件 + POST WAV
+ *   回放(I2C 命令 0x03) -> 暂停采集 -> 喇叭播放最近 N 秒 -> 恢复采集
  */
 #include "app_config.h"
 
@@ -20,6 +21,7 @@
 #include "app_store.h"
 #include "app_link.h"
 #include "app_net.h"
+#include "app_playback.h"
 
 #define APP_STATUS_PERIOD_MS 10000u
 
@@ -51,6 +53,11 @@ static void capture_task(void *arg)
               (unsigned long)(store_ring_bytes() / 1024u));
 
     for (;;) {
+        /* 喇叭回放期间暂停采集：喇叭与麦克风共用 I2S 数据线（半双工） */
+        if (playback_pause_poll()) {
+            os_msleep(20);
+            continue;
+        }
         int samples = audio_read(s_pcm, APP_PCM_SAMPLES_MAX);
         if (samples <= 0) {
             os_msleep(5);
@@ -157,6 +164,9 @@ static void trigger_task(void *arg)
         if (app_link_read_byte(&cmd, 20) == 0) {
             if (cmd == APP_LINK_CMD_TOUCH) {
                 handle_touch();
+            } else if (cmd == APP_LINK_CMD_PLAY) {
+                /* 回放最近 N 秒；阻塞约 N 秒，期间新触摸进 I2C 从机缓冲 */
+                (void)playback_play_clip();
             } else if (cmd == APP_LINK_CMD_PING) {
                 os_printf(LL_INFO, "[app] link ping from stm32\r\n");
             } else {

@@ -67,6 +67,12 @@
 
 #define APP_LINK_CMD_TOUCH     0x01u
 #define APP_LINK_CMD_PING      0x02u
+/* STM32 写 0x03：喇叭回放最近 N 秒录音（播放期间采集暂停） */
+#define APP_LINK_CMD_PLAY      0x03u
+
+/* ===================== 喇叭回放 ===================== */
+/* 音量衰减分母：越大越轻。SDK i2s_codec 示例的验证值是 10 */
+#define APP_PLAYBACK_VOLUME_DIV 10u
 
 /* ===================== 任务参数 ===================== */
 #define APP_TASK_CAPTURE_PRIO  5

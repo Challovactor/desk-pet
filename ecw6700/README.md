@@ -15,6 +15,8 @@ STM32 --I2C 从机 0x42 收到 0x01（触摸）───────────
 - 没有蓝牙、没有墨水屏；
 - STM32 只发 1 字节触摸命令，ECW 作 I²C 从机接收；
 - 录音持续写入 SD 环形区，触摸时回溯最近 `APP_CLIP_SECONDS` 秒；
+- 喇叭与麦克风共用 MIC 连接器的 I2S 线（半双工）：STM32 发 `0x03` 时暂停采集，
+  把最近 N 秒录音从 I2S TX 回放到喇叭，播完自动恢复采集；
 - Wi-Fi STA 连接由本应用接管（关闭 SDK 的 NV 自动连接）；
 - 服务器先按可配置 HTTP 实现，协议隔离在 `app_net.c`。
 
@@ -28,6 +30,7 @@ STM32 --I2C 从机 0x42 收到 0x01（触摸）───────────
 | `app_sdspi.c` | SPI 模式 SD 卡（CMD0/8/55/41/58/16/9/17/24） |
 | `app_store.c` | 裸扇区环形存储与"最近 N 秒"读取 |
 | `app_link.c` | I²C 从机 0x42，接收 STM32 触摸命令 |
+| `app_playback.c` | 喇叭回放：暂停采集 -> I2S TX 播放最近 N 秒 -> 恢复采集 |
 | `app_net.c` | Wi-Fi STA + lwip socket + HTTP POST |
 | `board_support/` | 冻结的板级引脚绑定（I2C0 = IO24/23） |
 
@@ -153,12 +156,18 @@ C:/moce/MOCEWorkbench-data/tools/ecw6700-windows/flash/eswin_tool.exe \
    **本配置假设 SCK 为 PDM 时钟**；若上板无数据，先把 `RXWS`/`RXSCK` 两个值互换，
    并用示波器确认 IO7 上有约 2.048MHz 的连续时钟。
 3. **PDM 位序**：32-bit slot 按 MSB-first 解码；用已知音调确认波形不反转、采样率约 32kHz。
-4. **I²C 从机地址**：ECW 0x42（7 位），STM32 0x84（8 位）。
-5. **DMA 通道**：I2S RX + SPI TX/RX（全双工两个）+ UART log 共用 6 个通道；
-   若 `read_enable` 返回 -4，先关掉 UART 日志 DMA 或减少 SPI DMA。
-6. **Wi-Fi 竞争**：SDK 启动代码会创建 NV 自动连接任务，本应用已先 `set_auto_connect(false)`
+4. **回放 TXD 复用**：喇叭与麦克风共用 MIC 连接器 SD 线（IO8）。回放把 IO8 切到
+   `FUNC_I2S_TXD`（时钟仍走 RXSCK/RXWS 引脚，主机模式下由控制器驱动）。若喇叭无声，
+   先用示波器确认 IO8 上有发送数据、IO7 上有 32kHz×64 位率的连续时钟；TXD 若无法
+   复用 IO8，需要改从 SDK 默认 TXD 引脚（IO15/IO25 等）单独接线到功放输入。
+5. **I²C 从机地址**：ECW 0x42（7 位），STM32 0x84（8 位）。命令：0x01 触摸、
+   0x02 PING、0x03 回放最近 N 秒。
+6. **DMA 通道**：I2S RX/TX + SPI TX/RX（全双工两个）+ UART log 共用 6 个通道；
+   若 `read_enable` 返回 -4，先关掉 UART 日志 DMA 或减少 SPI DMA。回放期间
+   RX 已停、TX 复用其通道，不会超限。
+7. **Wi-Fi 竞争**：SDK 启动代码会创建 NV 自动连接任务，本应用已先 `set_auto_connect(false)`
    并 `sta_stop()` 再接管；若日志出现 `sta busy`，等待其结束会自动重试。
-7. **DNS**：`getaddrinfo` 在 lwip 上是阻塞调用，无法设置超时。联调阶段请把
+8. **DNS**：`getaddrinfo` 在 lwip 上是阻塞调用，无法设置超时。联调阶段请把
    `APP_SERVER_HOST` 填成 **IP 地址**，避免 DNS 不可达时卡住上传任务。
 
 ## 编译环境
