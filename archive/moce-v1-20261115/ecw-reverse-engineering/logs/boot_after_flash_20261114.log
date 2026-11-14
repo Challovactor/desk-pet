@@ -1,0 +1,17 @@
+# Captured 2026-11-14 after flashing firmware_allinone.bin to the replacement board.
+# COM7 was later unplugged; this records the key lines observed on UART1 @115200.
+# Full boot also printed the SDK RF calibration table (PS_rf-I ... chNN wifi dcoc cal).
+
+[00:00:00.000][Boards-I][0]SDK version ECW6700F_V1.0.0B02P12, Release version 1.0.0
+[00:00:00.004][Boards-I][0]Start by: RST_TYPE_HARDWARE_REBOOT
+[00:00:00.012][Boards-I][0]flash init OK !  FlashID :0x1640c8
+[00:00:00.017][nv-I][0]Error: partition lookup failed, key=flash_protect, partion_num=8.
+[00:00:00.021][drivers-I][0][flwp] protect OFF (marker partition 'flash_protect' absent)
+[00:00:00.030][nv-I][0]EasyFlash V4.0.0 is initialize success.
+[00:00:00.401][Boards-I][0][ecw] i2c: board I2C_0 SCL pin=24 SDA pin=23 (controller)
+[00:00:00.401][Boards-I][0][ecw] init: mic=1 tts=1 i2c=1 interval=30s
+[00:00:00.401][Boards-I][0]Task:ecw_app create success. TCB@0x2001f050 PID:12 pri:2 stack@0x2001e038 hwm:0x3ca
+[00:00:00.427][Boards-I][0][ecw] state: e_stream (listening)
+[00:00:00.427][Boards-I][0]I2C write failed: addr=0x08 reason=3
+[00:00:00.439][Boards-I][c][ecw] i2c: write proto=0x01 failed rc=-3
+(repeats every ~12 ms while no STM32 peer ACKs address 0x08)

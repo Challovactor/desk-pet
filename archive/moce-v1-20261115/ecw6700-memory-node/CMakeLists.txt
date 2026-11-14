@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+project(moce_ecw6700f NONE)
+set(MOCE_ECW6700_SDK "/home/moce/moce/tools/firmware/ecw6700f-v1.0.0b02p12/ECW6700FSDK_V1.0.0B02P12/code" CACHE PATH "Pinned ESWIN ECW6700F SDK code root")
+include("${MOCE_ECW6700_SDK}/moce/ecw6700f.cmake")
+add_subdirectory(main)

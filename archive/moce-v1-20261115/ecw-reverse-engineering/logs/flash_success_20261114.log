@@ -1,0 +1,38 @@
+2026-11-14 16:41:31,919 - INFO: -----------------------------------------------------------------------------------
+2026-11-14 16:41:31,924 - INFO: eswin_tool.py v2.1.13
+2026-11-14 16:41:31,926 - INFO: flash download
+2026-11-14 16:41:31,948 - INFO: allinone file num:6
+2026-11-14 16:41:31,957 - INFO: COM7 stub size(B):0x315c
+2026-11-14 16:41:32,015 - INFO: COM7 sync ECW6700 OK (resp=0x04)
+2026-11-14 16:41:32,024 - INFO: COM7 dboot download_addr 0x80048000
+2026-11-14 16:41:33,137 - INFO: COM7 RAM download ok end
+2026-11-14 16:41:33,660 - INFO: COM7 A5 sync ok
+2026-11-14 16:41:33,712 - INFO: COM7 set baudrate:2000000
+2026-11-14 16:41:33,723 - INFO: COM7 A5 sync ok
+2026-11-14 16:41:33,732 - INFO: COM7 download file @0x00000000  size(B):0x2000
+2026-11-14 16:41:33,868 - INFO: COM7 download 100.00%
+2026-11-14 16:41:33,889 - INFO: COM7 hash check ok
+2026-11-14 16:41:33,890 - INFO: COM7 download file @0x00002000  size(B):0x76a0
+2026-11-14 16:41:34,449 - INFO: COM7 download 100.00%
+2026-11-14 16:41:34,473 - INFO: COM7 hash check ok
+2026-11-14 16:41:34,474 - INFO: COM7 download file @0x00014000  size(B):0x16af40
+2026-11-14 16:41:39,180 - INFO: COM7 download 8.82%
+2026-11-14 16:41:40,247 - INFO: COM7 download 17.63%
+2026-11-14 16:41:41,316 - INFO: COM7 download 26.45%
+2026-11-14 16:41:42,384 - INFO: COM7 download 35.27%
+2026-11-14 16:41:43,453 - INFO: COM7 download 44.08%
+2026-11-14 16:41:44,521 - INFO: COM7 download 52.90%
+2026-11-14 16:41:45,590 - INFO: COM7 download 61.72%
+2026-11-14 16:41:46,659 - INFO: COM7 download 70.53%
+2026-11-14 16:41:47,728 - INFO: COM7 download 79.35%
+2026-11-14 16:41:48,797 - INFO: COM7 download 88.17%
+2026-11-14 16:41:49,865 - INFO: COM7 download 96.98%
+2026-11-14 16:41:50,231 - INFO: COM7 download 100.00%
+2026-11-14 16:41:50,430 - INFO: COM7 hash check ok
+2026-11-14 16:41:50,430 - INFO: COM7 download file @0x003ec000  size(B):0x2000
+2026-11-14 16:41:50,516 - INFO: COM7 download 100.00%
+2026-11-14 16:41:50,537 - INFO: COM7 hash check ok
+2026-11-14 16:41:50,537 - INFO: COM7 download file @0x003fb000  size(B):0x3000
+2026-11-14 16:41:50,693 - INFO: COM7 download 100.00%
+2026-11-14 16:41:50,715 - INFO: COM7 hash check ok
+2026-11-14 16:41:50,715 - INFO: COM7 chip start_up

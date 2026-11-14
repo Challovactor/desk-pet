@@ -1,0 +1,3 @@
+/* Selected from exact frozen endpoint identities. */
+MOCE_BOUND_SIGNAL(MOCE_SIGNAL_I2C_SCL, BOARD_I2C_0, 0)
+MOCE_BOUND_SIGNAL(MOCE_SIGNAL_I2C_SDA, BOARD_I2C_0, 1)
