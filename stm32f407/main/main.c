@@ -18,6 +18,7 @@
  *   - 触摸控制器初始化失败会周期重试，不阻塞主循环。
  */
 #include "stm32f4xx_hal.h"
+#include "app_epd.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -534,6 +535,15 @@ int main(void)
 
     /* 上电先告诉 ECW 一声（对端可能还没起来，失败无妨） */
     (void)link_send(LINK_EVT_PING);
+
+    /* 开机在墨水屏上显示一次 logo（失败只记日志，不阻塞触摸主循环） */
+    if (epd_init() == 0) {
+        log_printf("[stm32] epd ready\r\n");
+        log_printf("[stm32] epd logo %s\r\n",
+                   epd_show_logo() == 0 ? "done" : "FAILED (busy timeout)");
+    } else {
+        log_printf("[stm32] epd init failed, skip\r\n");
+    }
 
     for (;;) {
         uint32_t now = HAL_GetTick();

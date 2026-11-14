@@ -14,7 +14,7 @@
 | SD 卡 | ECW6700 IO14(SCK) / IO12(MISO) / IO13(MOSI) / IO11(CS) | **软件 SPI**（GPIO 位翻转）SPI 模式裸扇区环形缓冲，从 LBA 2048 起 | 约 0.5–1 MHz |
 | TTS | ECW6700 UART（模组自有引脚） | 文本转语音模块，保留接法，固件暂未驱动 | — |
 | 2.0TP | F407 I2C3（PA8=SCL / PC9=SDA，RESET=PD15，INT=PD10 轮询不用） | CST816D 触摸屏，7 位地址 0x15；模组 LCD 引脚见 §1，当前只上电不驱动 | — |
-| 4.2EPD | F407 侧接口 | 4.2" 墨水屏接口保留（硬件在位），固件暂不驱动 | — |
+| 4.2EPD | F407：SCK=PC10 / MOSI=PC12（SPI3，与 LCD 共用）/ CS=PA15 / D/C=PC13 / RES=PA13 / BUSY=PD8 | UC8176 COF 400×300 黑白，模块自带升压；开机显示一次 logo（见 `stm32f407/README.md`） | — |
 
 **为什么音频不过板：** 录音（PDM 采集）、存储（SD 环形区）、上传（Wi-Fi HTTP）、
 回放（喇叭）全部在 ECW6700 侧完成，板间 I²C 只传 1 字节命令。
@@ -37,7 +37,11 @@ PB10/PB11 现在是 F407 的调试串口，不再承载音频。
 | 板间 SDA | PB9 | I2C1 主机 | 接 ECW6700 IO23 |
 | 调试串口 TX | PB10 | USART3_TX | 115200 8N1 |
 | 调试串口 RX | PB11 | USART3_RX | |
-| 4.2EPD | — | 接口保留 | 硬件在位，固件暂不驱动 |
+| 4.2EPD BUSY | PD8 | GPIO 输入 | 高=忙 |
+| 4.2EPD RES | PA13 | GPIO 输出 | 注意：SWDIO 复用脚，SWD 调试期间被占用 |
+| 4.2EPD D/C | PC13 | GPIO 输出 | 与 LCD 的 WR 共用（共总线、各自 CS） |
+| 4.2EPD CS | PA15 | GPIO 输出 | SPI_CS0；LCD 用 SPI_CS1=PC11 |
+| 4.2EPD SCK/MOSI | PC10 / PC12 | SPI3（AF6） | 与 2.0TP 模组 LCD 共享总线 |
 
 注意：F407 作为 I²C 主机时，HAL 的 `DevAddress` 必须写 8 位形式 `0x42 << 1 = 0x84`；
 ECW 侧 `drv_i2c_slave_open` 用未左移的 7 位地址 `0x42`。
