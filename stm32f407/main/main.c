@@ -21,6 +21,7 @@
 #include "app_epd.h"
 #include "app_logo.h"
 #include "app_sound_stm32.h"
+#include "app_lcd.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -818,6 +819,17 @@ int main(void)
         }
     } else {
         log_printf("[stm32] epd init failed, skip\r\n");
+    }
+
+    /* 2.0" ST7789 彩色屏：放在 EPD 全刷之后。
+     * EPD 刷新时升压泵电流很大，实测会让 ST7789 掉电复位，刚显示的彩色
+     * 画面会消失；等 EPD 刷完再初始化并显示，背光也在这之后才点亮。 */
+    if (lcd_init() == 0) {
+        int lret = lcd_show_logo();
+
+        log_printf("[stm32] lcd logo %s\r\n", lret == 0 ? "shown" : "FAILED");
+    } else {
+        log_printf("[stm32] lcd init failed\r\n");
     }
 
     /* ECW 启动需要十几秒（SD 资产校验），先等 1.5 s 再试取 SD 版 LOGO */

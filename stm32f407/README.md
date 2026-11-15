@@ -28,6 +28,16 @@
 | 调试串口 | USART3 | PB10=TX, PB11=RX, 115200 8N1 |
 | EPD 墨水屏 | SPI3 共享总线 | SSD1677 系，800×480 1bit：SCK=PC10, MOSI=PC12（与 LCD 共用）, CS=PA15, RES=PA13, BUSY=PD8（高=忙）；D/C=PC3 固定低（9-bit 字模式） |
 
+## 2.0" 彩色屏 LOGO（app_lcd.c）
+
+- ST7789，240×320，RGB565；SPI3 与墨水屏共享总线：
+  SCK=PC10 / MOSI=PC12（AF6）、CS=PC11、DC=PC13、RESET=PA11、背光=PD14；
+- 初始化序列取自工作区 `触摸屏可行代码`（SLPOUT/COLMOD=0x55/MADCTL/INVON/DISPON）；
+- LOGO 由 `tools/build_lcd_logo.py` 转成 240×320 RGB565 并做 RLE 压缩
+  （17.7KB），生成 `app_lcd_logo.c`，解码后按 512B 块流式写 GRAM；
+- **显示时机必须在 EPD 全刷之后**：EPD 刷新时升压泵电流大，实测会让
+  ST7789 掉电复位，先显示的彩色画面会消失；背光也在绘制完成后才点亮。
+
 ## 情绪音效本地播放（app_sound_stm32.c）
 
 - 喇叭模块接在 SHIELD 的 SPK 口：**PB12=I2S_WS、PB13=I2S_SCK、PB15=I2S_SD**

@@ -59,6 +59,9 @@ Wi-Fi 上传和喇叭回放；STM32F407 只负责 2.0TP 触摸事件，经板间
   I2S2 主发送），音效数据 embed 在 STM32 flash（`app_sounds_data.c`，
   `aligned(4)`），由 STM32 本地播放；I2S2 时钟必须配 PLLI2S（192/2）。
   ECW 的 U2（IO6/7/8）属于芯片的 I2S **RX 引脚组**，无法发送，不要再去调。
+- **2.0" 彩屏**：ST7789 240×320 RGB565，SPI3 共享（CS=PC11/DC=PC13/RST=PA11/BL=PD14），
+  开机显示 LOGO.png（RLE 17.7KB）。必须在 EPD 全刷之后再初始化/显示，否则
+  EPD 升压泵的电流冲击会让 ST7789 复位、画面消失。
 - **墨水屏**：SSD1677 系 800×480 1bit，SPI 9-bit 字（D/C=PC3 固定低），开机全刷
   内置 48000 字节 LOGO 约 3.7s。SD 取图代码在但默认关闭（`LOGO_FETCH_FROM_SD 0`）：
   ECW 的 I2C 从机长块 TX 在事务边界会时钟拉伸并拉死总线，连同触摸链路一起失效。
