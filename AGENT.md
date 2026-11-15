@@ -55,6 +55,10 @@ Wi-Fi 上传和喇叭回放；STM32F407 只负责 2.0TP 触摸事件，经板间
   详见 `docs/10-wifi-boot-sequencing.md`。
 - **SD**：裸扇区环形区（从 LBA 2048 起），不是 FATFS；卡上原有数据会被覆盖。
   音效块从 LBA 1024 起，LOGO 块固定在 LBA 1536（48032 字节，`tools/build_logo_blob.py` 生成）。
+- **喇叭/音效**：模块接在 STM32 SHIELD（PB12=I2S_WS/PB13=I2S_SCK/PB15=I2S_SD，
+  I2S2 主发送），音效数据 embed 在 STM32 flash（`app_sounds_data.c`，
+  `aligned(4)`），由 STM32 本地播放；I2S2 时钟必须配 PLLI2S（192/2）。
+  ECW 的 U2（IO6/7/8）属于芯片的 I2S **RX 引脚组**，无法发送，不要再去调。
 - **墨水屏**：SSD1677 系 800×480 1bit，SPI 9-bit 字（D/C=PC3 固定低），开机全刷
   内置 48000 字节 LOGO 约 3.7s。SD 取图代码在但默认关闭（`LOGO_FETCH_FROM_SD 0`）：
   ECW 的 I2C 从机长块 TX 在事务边界会时钟拉伸并拉死总线，连同触摸链路一起失效。

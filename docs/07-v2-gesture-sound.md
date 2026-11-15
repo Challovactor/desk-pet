@@ -35,9 +35,28 @@ CST816D (I2C3) ──寄存器 0x01 GestureID──> STM32 手势状态机
 | 上滑 | `0x13` | 正面 | 02_joy / 04_murmur |
 | 双击 | `0x12` | 负面 | 01_sad / 03_cry |
 | 下滑 | `0x14` | 负面 | 01_sad / 03_cry |
-| 长按/横向滑动/未知 | `0x01` | 仅录音，不播音效 | — |
+| 长按/横向滑动/未知（普通触摸） | `0x01` | **全部音效随机**（不分类别） | 4 个音效等概率 |
 
-- 同类音效由 `assets_pick()` 用 xorshift 随机选择，并避免连续两次同一文件。
+- 同类音效由 `assets_pick()` 用 xorshift 随机选择，并避免连续两次同一文件；
+- 普通触摸（`0x01`）走 `sound_play_random()`：`assets_pick_any()` 在全部 4 个
+  音效里等概率选一个播放，再取录音快照；
+- 诊断用的 1 kHz 测试音已默认关闭（`APP_SOUND_TEST_TONE 0`），需要定位 SPK
+  时再打开。
+- **2026-11-15 最终方案：喇叭改由 STM32 本地播放。**
+  - 原因：ECW 的 I2S 引脚按芯片手册分为 RX 组（IO6/7/8 = RXWS/RXSCK/RXD）
+    与 TX 组（TXWS=IO3/10/26、TXSCK=IO4/11/20、TXD=IO2/9/25）。U2 的
+    LRCK/BCLK/DIN 接在 IO6/7/8（RX 组），ECW 无法向这组引脚发送 I2S；
+    参考固件所谓的"噪音"是 RX 主机时钟 + 麦克风 PDM 数据串到 DIN 的结果。
+  - 硬件：喇叭模块转到 **STM32F407 SHIELD 的 SPK 口**：
+    PB12=I2S_WS、PB13=I2S_SCK、PB15=I2S_SD（SPI2/I2S2，AF5）。
+  - STM32 固件：`app_sound_stm32.c` 用 I2S2 主发送 + DMA1 Stream4（Channel 0），
+    16 kHz、16-bit、飞利浦格式；I2S 时钟必须由 `HAL_RCCEx_PeriphCLKConfig`
+    配置 PLLI2S（PLLI2SN=192/PLLI2SR=2 → 96MHz），否则 TX 立即下溢（UDR）。
+  - 音效数据由 `tools/build_stm32_sounds.py` 从 ECW 的 `animal_sounds.bin`
+    生成 `stm32f407/main/app_sounds_data.c`（**`aligned(4)`**，DMA 半字访问
+    奇数地址会传输错误）。指挥/随机选择在 STM32 侧完成，播放不经过 ECW。
+  - ECW 仍保留 TTS（UART0）与录音/上传；其本地音效回放代码保留但已无实际
+    声学输出（可选后续关闭以节省采集暂停时间）。
 - 映射集中在 `app_sound.c:gesture_class()`；改产品语义只改这一个函数。
 
 ## 4. STM32 识别策略

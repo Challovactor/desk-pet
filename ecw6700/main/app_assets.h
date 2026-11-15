@@ -33,6 +33,9 @@ int assets_count(void);
 /* 按情绪类别随机选一个音效；没有该类资产时返回 -1。 */
 int assets_pick(uint8_t class_id);
 
+/* 从全部音效里随机选一个（不分类别）。 */
+int assets_pick_any(void);
+
 /* 取得指定音效的元数据。 */
 int assets_get(int index, struct asset_info *out);
 

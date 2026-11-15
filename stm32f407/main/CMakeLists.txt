@@ -9,6 +9,8 @@ add_executable(firmware
   main.c
   app_epd.c
   app_logo.c
+  app_sound_stm32.c
+  app_sounds_data.c
   epd_logo.c
   syscalls.c
   ${HAL_SRCS}

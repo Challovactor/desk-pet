@@ -20,6 +20,7 @@
 #include "stm32f4xx_hal.h"
 #include "app_epd.h"
 #include "app_logo.h"
+#include "app_sound_stm32.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -587,6 +588,15 @@ static void emit_event(uint8_t cmd, const char *why)
     }
     last_event_ms = now;
     stat_touch_events++;
+    /* 本地播放情绪音效（喇叭在 STM32 SHIELD）；阻塞到播完。 */
+    {
+        int sret = sound_stm_play_cmd(cmd);
+
+        if (sret != 0) {
+            log_printf("[stm32] sound play failed for 0x%02X (%d)\r\n",
+                       (unsigned)cmd, sret);
+        }
+    }
     if (link_send_retry(cmd) == 0) {
         log_printf("[stm32] %s -> cmd 0x%02X %s (#%lu)\r\n",
                    why, cmd, cmd_name(cmd),
@@ -775,6 +785,13 @@ int main(void)
 
     log_printf("\r\n[stm32] touch bridge boot (v2 gestures), link addr=0x%02X\r\n",
                LINK_I2C_ADDR7);
+
+    /* 喇叭在 STM32 SHIELD（I2S2 PB12/13/15）；音效数据在 flash，本地播放 */
+    if (sound_stm_init() == 0) {
+        log_printf("[stm32] sound ready (I2S2 PB12/13/15)\r\n");
+    } else {
+        log_printf("[stm32] sound init FAILED\r\n");
+    }
 
     if (touch_init() != 0) {
         log_printf("[stm32] touch init failed, will retry\r\n");

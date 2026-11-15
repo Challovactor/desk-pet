@@ -28,6 +28,18 @@
 | 调试串口 | USART3 | PB10=TX, PB11=RX, 115200 8N1 |
 | EPD 墨水屏 | SPI3 共享总线 | SSD1677 系，800×480 1bit：SCK=PC10, MOSI=PC12（与 LCD 共用）, CS=PA15, RES=PA13, BUSY=PD8（高=忙）；D/C=PC3 固定低（9-bit 字模式） |
 
+## 情绪音效本地播放（app_sound_stm32.c）
+
+- 喇叭模块接在 SHIELD 的 SPK 口：**PB12=I2S_WS、PB13=I2S_SCK、PB15=I2S_SD**
+  （SPI2/I2S2，AF5），模块自带供电；
+- I2S2 主发送 + DMA1 Stream4 Channel0，16 kHz/16-bit/飞利浦格式；
+  PLLI2S 由 `HAL_RCCEx_PeriphCLKConfig` 配置（PLLI2SN=192、PLLI2SR=2 → 96MHz），
+  不配会立即 UDR 下溢；
+- 音效 PCM 由 `tools/build_stm32_sounds.py` 从 `ecw6700/main/assets/animal_sounds.bin`
+  生成为 `app_sounds_data.c`（4 段、16 kHz、单声道，**aligned(4)**）；
+- 命令映射：0x11/0x13 正面、0x12/0x14 负面、0x01 全随机；播放阻塞到 DMA 完成；
+- 实测 2026-11-15 出声。
+
 ## 墨水屏（app_epd.c）
 
 - 驱动：SSD1677 系 COF，**800×480 1bit，整帧 48000 字节**（与已实机点亮的

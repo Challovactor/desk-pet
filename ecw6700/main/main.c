@@ -209,9 +209,11 @@ static void trigger_task(void *arg)
         if (app_link_read_byte(&cmd, 20) == 0) {
             switch (cmd) {
             case APP_LINK_CMD_TOUCH:
+                /* 任意触摸（长按/未知手势）：随机播一个音效，再取录音快照 */
+                (void)sound_play_random();
                 handle_touch();
 #if APP_SOUND_TEST_TONE
-                /* 长按/未知手势：播 1 kHz 方波，便于用万用表/耳朵定位 SPK */
+                /* 诊断用：再播 1 kHz 方波，便于定位 SPK（默认已关闭） */
                 (void)playback_play_tone(APP_SOUND_TEST_TONE_HZ,
                                          APP_SOUND_TEST_TONE_MS,
                                          APP_SOUND_TEST_TONE_I2S);

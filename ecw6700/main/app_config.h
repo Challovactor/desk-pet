@@ -134,7 +134,7 @@
 
 /* 临时诊断：长按/未知手势（0x01）后播放 1 kHz 方波，用于确认 SPK 的
  * 5 根线/格式。产品验收后把 APP_SOUND_TEST_TONE 设为 0。 */
-#define APP_SOUND_TEST_TONE      1
+#define APP_SOUND_TEST_TONE      0
 #define APP_SOUND_TEST_TONE_HZ   1000u
 #define APP_SOUND_TEST_TONE_MS   1000u
 #define APP_SOUND_TEST_TONE_I2S  1

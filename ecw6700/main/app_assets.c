@@ -527,6 +527,20 @@ int assets_pick(uint8_t class_id)
     return matches[r];
 }
 
+int assets_pick_any(void)
+{
+    uint32_t r;
+
+    if (!s_ready || s_count == 0u) {
+        return -1;
+    }
+    s_rng ^= s_rng << 13;
+    s_rng ^= s_rng >> 17;
+    s_rng ^= s_rng << 5;
+    r = s_rng % (uint32_t)s_count;
+    return (int)r;
+}
+
 int assets_read(int index, uint32_t byte_offset, void *dst, uint32_t len)
 {
     if (!s_ready || dst == NULL || index < 0 || index >= (int)s_count) {

@@ -31,4 +31,8 @@ int sound_codec_ok(void);
 /* 处理一条手势命令；不认识的命令返回 -1。内部会阻塞到音效播完。 */
 int sound_play_gesture(uint8_t link_cmd);
 
+/* 普通触摸（0x01）：从全部音效里随机播一个（不区分类别）。
+ * 阻塞到播放结束；assets 未就绪时返回 -1。 */
+int sound_play_random(void);
+
 #endif

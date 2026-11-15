@@ -118,3 +118,23 @@ int sound_play_gesture(uint8_t link_cmd)
               class_id == ASSET_CLASS_POSITIVE ? "positive" : "negative", index);
     return playback_play_asset(index);
 }
+
+int sound_play_random(void)
+{
+    struct asset_info info;
+    int index;
+
+    if (!assets_ready()) {
+        os_printf(LL_WARN, "[sound] assets not ready, skip random touch\r\n");
+        return -1;
+    }
+    index = assets_pick_any();
+    if (index < 0) {
+        return -1;
+    }
+    if (assets_get(index, &info) == 0) {
+        os_printf(LL_INFO, "[sound] touch -> random asset %d (%s)\r\n",
+                  index, info.name);
+    }
+    return playback_play_asset(index);
+}

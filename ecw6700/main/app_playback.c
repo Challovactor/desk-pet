@@ -38,8 +38,10 @@
 /* 每块源样本数：512 个 32k 样本 -> 约 256 个 16k 样本；16k 资产 -> 512 个 */
 #define PLAYBACK_BLOCK_SAMPLES   512u
 #define PLAYBACK_DMA_BUFFERS     2u
-#define PLAYBACK_TX_SAMPLES      PLAYBACK_BLOCK_SAMPLES
-#define PLAYBACK_TX_BYTES        (PLAYBACK_TX_SAMPLES * 2u * 2u)
+/* TX 输出：32-bit 左对齐立体声（与参考固件的 32-bit 数据宽度一致）。
+ * 每块 256 个输出样本，双缓冲共 2×256×2×4 = 4KB，与原 16-bit 布局同大小。 */
+#define PLAYBACK_TX_SAMPLES      256u
+#define PLAYBACK_TX_BYTES        (PLAYBACK_TX_SAMPLES * 2u * 4u)
 /* 采集任务可能阻塞在 1s 的 read 超时里，确认暂停最多等 2.5s */
 #define PLAYBACK_ACK_TIMEOUT_MS  2500u
 #define PLAYBACK_TX_DRAIN_MS     50u
@@ -58,8 +60,10 @@ static volatile int s_pause_req;    /* 播放期间要求采集任务暂停 */
 static volatile int s_paused_ack;   /* 采集任务已确认暂停（不在 audio_read 里） */
 
 /* TX DMA 直接从用户缓冲搬运，必须放在 .dma.data 段（与 SDK 示例一致） */
-static int16_t s_tx_buf[PLAYBACK_DMA_BUFFERS][PLAYBACK_TX_BYTES / sizeof(int16_t)]
+static int32_t s_tx_buf[PLAYBACK_DMA_BUFFERS][PLAYBACK_TX_BYTES / sizeof(int32_t)]
     __attribute__((section(".dma.data"), aligned(4)));
+/* 重采样后的 16 kHz 单声道中间缓冲（转换到 32-bit 立体声再提交） */
+static int16_t s_mix[PLAYBACK_TX_SAMPLES] __attribute__((aligned(4)));
 
 static os_sem_handle_t s_tx_sem;
 static volatile unsigned int s_tx_queued;
@@ -104,7 +108,7 @@ static void tx_callback(void *buf, unsigned int len)
     }
 }
 
-static int submit_block(int16_t *buf, unsigned int len)
+static int submit_block(void *buf, unsigned int len)
 {
     /* 驱动在"已排队到活动 DMA 块之后"时返回 -2，视为成功 */
     int busy = s_tx_queued != s_tx_completed;
@@ -425,7 +429,7 @@ static int play_source(const struct playback_source *src, unsigned volume_div,
     cfg.slot_format = slot_format;
 #if APP_SOUND_TX_SLOT32
     cfg.slot_width = SLOT_WIDTH_32BIT;
-    cfg.data_width = SLOT_DATA_WIDTH_16BIT;
+    cfg.data_width = SLOT_DATA_WIDTH_32BIT;
 #else
     cfg.slot_width = SLOT_WIDTH_16BIT;
     cfg.data_width = SLOT_DATA_WIDTH_16BIT;
@@ -458,11 +462,16 @@ static int play_source(const struct playback_source *src, unsigned volume_div,
         uint32_t want = src->total_samples - fed;
         int got;
         uint32_t out_samples;
-        int16_t *out = s_tx_buf[block % PLAYBACK_DMA_BUFFERS];
+        int16_t *out = s_mix;
+        int32_t *tx = s_tx_buf[block % PLAYBACK_DMA_BUFFERS];
         unsigned int i;
 
         if (want > PLAYBACK_BLOCK_SAMPLES) {
             want = PLAYBACK_BLOCK_SAMPLES;
+        }
+        if (src->src_rate == APP_SOUND_SAMPLE_RATE &&
+            want > PLAYBACK_TX_SAMPLES) {
+            want = PLAYBACK_TX_SAMPLES;
         }
         /* 8 kHz 源要 2× 升采样，输出不能超过 TX 块样本数 */
         if (src->src_rate == APP_PCM_SAMPLE_RATE &&
@@ -498,14 +507,15 @@ static int play_source(const struct playback_source *src, unsigned volume_div,
             failed = 1;
             break;
         }
-        /* 单声道复制成立体声，并按音量分母衰减。
-         * 必须从后往前展开：out 同时是源缓冲，正序会把尚未读取的样本覆盖。 */
+        /* 单声道复制成 32-bit 左对齐立体声（样本 << 16）。
+         * 从后往前展开：out 同时是源缓冲，正序会覆盖尚未读取的样本。 */
         for (i = out_samples; i-- > 0u;) {
-            int16_t sample = (int16_t)(out[i] / (int)volume_div);
-            out[i * 2u] = sample;
-            out[i * 2u + 1u] = sample;
+            int32_t sample = ((int32_t)(out[i] / (int)volume_div)) << 16;
+
+            tx[i * 2u] = sample;
+            tx[i * 2u + 1u] = sample;
         }
-        if (submit_block(out, out_samples * 4u) != 0) {
+        if (submit_block(tx, out_samples * 8u) != 0) {
             os_printf(LL_ERR, "[play] tx submit failed\r\n");
             failed = 1;
             break;
