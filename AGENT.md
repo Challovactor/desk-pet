@@ -17,10 +17,18 @@ Wi-Fi 上传和喇叭回放；STM32F407 只负责 2.0TP 触摸事件，经板间
 
 ## 2. 动手前先读
 
-1. `docs/06-ecw-bringup-2026-11-15.md`（当前架构、引脚、构建烧录、9 条关键修复）
-2. `ecw6700/README.md`、`stm32f407/README.md`（子工程职责与配置）
-3. `ecw6700/main/app_config.h`（所有运行配置）
-4. `ecw6700/main/app_sdspi.c`、`app_net.c`、`app_playback.c`（三个最容易改坏的文件）
+1. `docs/06-ecw-bringup-2026-11-15.md`（v1 架构、引脚、构建烧录、9 条关键修复）
+2. `docs/07-v2-gesture-sound.md`、`docs/08-v2-server-upload.md`（v2 手势/音效/上传）
+2.5 `docs/09-logo-sd-i2c-handoff.md`（LOGO/EPD 驱动与 I2C 取图的失败记录，
+   继续该方向前必读）
+2.6 `docs/10-wifi-boot-sequencing.md`（Wi-Fi 扫描/关联时序与上电初始化顺序，
+   改 `app_net.c`/`main.c` 启动流程前必读）
+2.7 `docs/11-capture-sd-load-analysis.md`（SD 位翻转写入的 CPU 负载、
+   网络任务优先级、"15 秒分段"方案为何不降低负载）
+3. `ecw6700/README.md`、`stm32f407/README.md`（子工程职责与配置）
+4. `ecw6700/main/app_config.h`（所有运行配置）
+5. `ecw6700/main/app_sdspi.c`、`app_net.c`、`app_playback.c`、`app_assets.c`、
+   `app_https.c`、`app_upload.c`（最容易改坏的文件）
 
 ---
 
@@ -29,13 +37,27 @@ Wi-Fi 上传和喇叭回放；STM32F407 只负责 2.0TP 触摸事件，经板间
 - **当前主分支**：`main`。当前版本于 2026-11-15 在实物上验证。
 - **已验证**：CST816D 触摸、板间 I²C、PDM/I2S 初始化、软件 SPI SD、30 秒片段、
   Wi-Fi 2.4GHz 关联与 IP。
-- **未验证**：音频实际内容（PCM 是否静音/噪声）、HTTP 上传（服务器当时不可达）、
-  喇叭回放（仅编译通过）。
-- **音频格式**：当前 PCM16LE、**32kHz 单声道**、回溯 **30 秒**。
-- **服务器协议**：当前是明文 HTTP `POST /api/record` + `POST /api/audio`。
-  正式 `desk-recorder/v1`（MQTT+TLS/HTTPS、16kHz、分钟级、App 发起任务）**未接入**。
+- **已上板**：STM32 手势/板间链路/墨水屏 LOGO（SSD1677 800×480，开机 3.7s 全刷）；ECW 录音/SD/资产/I2S TX
+  DMA、Wi-Fi + MQTT/TLS。
+- **未验证**：音频内容、SPK 模块出声（SPK pin 1=NC，模块需外部供电）、
+  正式上传闭环（在线握手刚修正，待复测）。
+- **音频格式**：PDM 采集 32kHz；落盘 PCM16LE **8kHz 单声道**（4 阶 Butterworth
+  3.4kHz 低通 + 4:1 抽取）；上传/回放统一 **16kHz**（8→16 线性插值）。
+  依据见 `docs/11-capture-sd-load-analysis.md`。
+- **服务器协议**：v2 默认 `APP_UPLOAD_FORMAL=1`，走 `desk-recorder/v1`
+  （HTTPS 443 + MQTT/TLS 8883，16kHz WAV + SHA256，分钟级）。
+  v1 明文 HTTP `/api/record` + `/api/audio` 保留为回退（`APP_UPLOAD_FORMAL=0`）。
 - **板间 I²C**：STM32 主机，ECW 从机；7 位地址 0x42（HAL 8 位 0x84）；只传 1 字节命令。
+- **Wi-Fi**：这个 SDK 在 `sta_stop` 之后、没有主动扫描时 supplicant 不会自行
+  扫描（100 秒零日志），所以**连接前必须扫描一次**（`APP_WIFI_SCAN_DEBUG 1`）；
+  关联/握手期间绝不能 `sta_stop/sta_start`（会得到假的 reason=15）。
+  启动顺序：先让 Wi-Fi 关联（最多 25 秒），再做 SD 资产校验。
+  详见 `docs/10-wifi-boot-sequencing.md`。
 - **SD**：裸扇区环形区（从 LBA 2048 起），不是 FATFS；卡上原有数据会被覆盖。
+  音效块从 LBA 1024 起，LOGO 块固定在 LBA 1536（48032 字节，`tools/build_logo_blob.py` 生成）。
+- **墨水屏**：SSD1677 系 800×480 1bit，SPI 9-bit 字（D/C=PC3 固定低），开机全刷
+  内置 48000 字节 LOGO 约 3.7s。SD 取图代码在但默认关闭（`LOGO_FETCH_FROM_SD 0`）：
+  ECW 的 I2C 从机长块 TX 在事务边界会时钟拉伸并拉死总线，连同触摸链路一起失效。
 - **临时热点**：联调时曾用 `moce/12345678`；正式热点在 `app_config.h` 中配置。
 
 ---
@@ -52,14 +74,22 @@ Wi-Fi 上传和喇叭回放；STM32F407 只负责 2.0TP 触摸事件，经板间
 | `app_sdspi.c` | **GPIO 位翻转软件 SPI** 的 SD 协议实现 | 高（见第 6 节红线） |
 | `app_store.c` | 裸扇区环形区、最近 N 秒读取 | 中 |
 | `app_link.c` | I²C0 从机 0x42，接收 STM32 命令 | 中 |
-| `app_playback.c` | 暂停采集 → I2S TX 回放 → 恢复采集 | 中 |
-| `app_net.c` | Wi-Fi STA、AP 扫描诊断、lwip socket、HTTP POST | 中 |
+| `app_playback.c` | 暂停采集 → I2S TX 16 kHz 回放 → 恢复；ES8311 启动配置 | 中 |
+| `app_net.c` | Wi-Fi STA、AP 扫描诊断、lwip socket、v1 HTTP POST（回退） | 中 |
+| `app_assets.c` | 音效 blob 校验、首次写入 SD LBA 1024、随机选择/读取 | 中 |
+| `app_sound.c` | 手势命令 → 情绪类别；codec 启动任务 | 中 |
+| `app_resample.c` | 32k→8k 四阶低通抽取（在 app_audio）+ 8k→16k 插值 | 高（系数/相位） |
+| `app_sounds_blob.c` | `.incbin animal_sounds.bin` | 低（但依赖构建脚本复制） |
+| `app_https.c` | mbedTLS HTTPS 客户端、流式 PUT | 高（TLS/内存） |
+| `app_mqtt.c` | MQTT/TLS presence + commands/events | 高（schema 未确认） |
+| `app_upload.c` | desk-recorder/v1 四步上传、WAV/SHA256 | 高（schema 未确认） |
+| `app_sha256.c` / `app_json.c` / `app_ca_cert.c` | 哈希/JSON 取值/CA 占位 | 低 |
 
 ### STM32F407（`stm32f407/main/`）
 
 | 文件 | 职责 |
 |---|---|
-| `main.c` | CST816D 触摸轮询、去抖、I²C1 主机写事件、USART3 日志 |
+| `main.c` | CST816D 触摸轮询、硬件 GestureID + 软件兜底、I²C1 主机写事件、USART3 日志 |
 | `syscalls.c` | 最小 newlib 桩，堆上限 `_estack - 8KB` |
 
 ### 构建脚本（工作区，不在本仓库）
@@ -128,13 +158,23 @@ STM32：115200 **8E1**，**BOOT0=1 且保持高电平期间复位/上电**，写
    `YOUR_SERVER_IP` 等占位符。
 6. **不要提交编译产物**：`.bin/.elf/.hex/.map`、`build/`。ECW 镜像的 `.rodata`
    会包含编译时的 Wi-Fi 凭据。
-7. **不要擅自切换音频格式或服务器协议。** 当前是 32kHz / 30 秒 / 明文 HTTP；
+7. **不要擅自切换音频格式或服务器协议。** 当前是 8kHz 落盘 / 16kHz 上传 / 30 秒；
    正式协议是 16kHz / 分钟级 / MQTT+TLS+HTTPS，且**设备不能自行创建保存任务**
    （只能 App/管理网页创建）。切换前必须先定产品流程和服务端接口。
 8. **`HAL_I2C_DeInit()` 会关 I2C 时钟，`HAL_I2C_Init()` 不会重新开。**
    任何总线恢复后必须 `__HAL_RCC_I2Cx_CLK_ENABLE()`。
 9. **不要用“每个地址都 ACK”判断 I2C 器件存在。** 这通常是 SDA/SCL 被拉死的总线假象；
    结合正常/交换 SCL/SDA 两个方向、以及示波器/万用表判断。
+10. **不要移动音效区/环形区边界。** 音效区 LBA 1024–2047，录音环形区从
+    LBA 2048 开始。两者重叠会静默破坏音效或录音。
+11. **本板 SPK 是纯 I2S，不是 ES8311 控制口。** U2 GH1.25-5P 的引脚是
+    NC/LRCK/BCLK/DIN/GND，pin 1 不供电；`APP_CODEC_CONFIG_ENABLE=0`。
+    只有在其它带 ES8311 的硬件上才启用 codec 任务（它必须在 I2S 16 kHz
+    MCLK 稳定后、板间 I2C 从机打开前配置）。
+12. **不要关闭 TLS 证书校验。** desk-recorder/v1 要求 CA 校验；`app_ca_cert.c`
+    是占位符时 HTTPS/MQTT 会直接拒绝连接，这是预期行为。
+13. **构建脚本必须继续复制 `main/assets/*.bin`。** `app_sounds_blob.c` 的
+    `.incbin` 以 SDK 板级目录为基准；漏掉这一步会导致编译失败。
 
 ---
 
@@ -148,9 +188,14 @@ STM32：115200 **8E1**，**BOOT0=1 且保持高电平期间复位/上电**，写
 - [ ] STM32 启动日志出现 `touch chip id=0xB6`、`touch ready`
 - [ ] 触摸一次，ECW 打印 `clip N queued: ... bytes, ...s`
 - [ ] Wi-Fi 日志出现 `sta associated`、`got ip`
-- [ ] 若改了上传逻辑：`[net] record event sent` / `clip N uploaded`，
-      或明确的 HTTP 错误码
+- [ ] 若改了上传逻辑：`[net] record event sent` / `clip N uploaded`（v1），
+      或 `[up] job=...` / `[up] PUT blob: http 2xx`（v2）
 - [ ] 若改了回放：STM32 发 `0x03`，ECW 打印 `[play] clip ...`，播完恢复采集
+- [ ] 若改了手势/音效：ECW 打印 `[asset] ready: 4 sounds`、
+      `[sound] codec task done, ok=1`、`[sound] gesture 0x11 -> positive class`、
+      `[play] sound ...` / `[play] done`
+- [ ] STM32 日志：单击/双击/上滑/下滑分别出现 `cmd 0x11/0x12/0x13/0x14`
+- [ ] 双击只产生一条 `0x12`；单击延迟约 300 ms
 
 无法上板时，至少说明“仅编译通过/未上板验证”，不要写成已验证。
 
@@ -174,13 +219,19 @@ STM32：115200 **8E1**，**BOOT0=1 且保持高电平期间复位/上电**，写
 
 ## 9. 服务器协议现状（不要误改）
 
-- 当前代码：明文 HTTP，`POST /api/record` + `POST /api/audio`，32kHz/30 秒。
-- 正式协议：`desk-recorder/v1`（服务端文档 `HARDWARE_INTEGRATION.md`）：
-  MQTT 3.1.1+TLS 8883、HTTPS 443、Bearer 设备令牌、私有 CA、16kHz 单声道 16-bit WAV、
-  UTC 校时、SHA256、`GET/POST/PUT/result` 四步、任务持久化与重启恢复。
-- **硬冲突**：正式协议只允许 App/管理网页创建保存任务，设备不能自建。
-  “触摸屏拍一下保存”需要服务端扩展或 App 中转，接入前必须先确认产品流程。
-- 当前决定：服务器通信改造暂缓，保持现有软硬件逻辑不变。
+- v2 默认 `APP_UPLOAD_FORMAL=1`：`desk-recorder/v1` 设备主动保存。
+  - HTTPS 443：`POST /device/v1/recordings` → `GET /jobs/{id}` →
+    `POST /output` → `PUT /output/blob` → `POST /result`。
+  - MQTT 3.1.1+TLS 8883：`commands/events` QoS1、`telemetry` QoS0、
+    `presence` QoS1 retained；90 秒无有效心跳视为离线。
+  - 音频固定 16 kHz/单声道/16-bit WAV，上限 115,200,044 字节。
+- v1 明文 HTTP（`/api/record` + `/api/audio`）保留，`APP_UPLOAD_FORMAL=0` 回退。
+- **未决**：设备令牌、MQTT 账号、CA PEM，以及 presence/telemetry/命令/
+  output/result 的完整 JSON schema。API.md 只给了语义，没给字段名；
+  改 schema 时集中在 `app_mqtt.c` 的 publish/parse 和 `app_upload.c` 的
+  `build_output_json()`/`build_result_json()`。
+- 设备不能自行创建“任意已有文件上传”任务；`POST /recordings` 保存的是
+  命令执行时最近 N 分钟。触摸只是触发一次设备来源的保存申请。
 
 ---
 
@@ -200,9 +251,16 @@ STM32：115200 **8E1**，**BOOT0=1 且保持高电平期间复位/上电**，写
 ## 11. 当前未完成项
 
 1. 音频内容验证（导出/回放 WAV，确认不是静音/噪声）。
-2. HTTP 上传闭环（服务器可达性 + 服务端接口）。
-3. 喇叭回放实机试听与音量/时序调整。
-4. 正式服务器协议接入（16kHz、分钟级、MQTT+TLS/HTTPS、UTC、SHA256、任务持久化）。
-5. 触摸触发保存与服务端“App 发起任务”的产品流程对齐。
-6. 凭据轮换与公开仓库历史中的 Wi-Fi 密码清理。
-7. `叫声音效/` 情绪音效的触发方式与存放位置（当前未被引用）。
+2. v2 手势/音效上板验证：CST816D GestureID、ES8311 I²C0/0x18、MCLK/WS/SCK、
+   功放使能、半双工数据线（见 `docs/07` 第 8 节）。
+3. v2 正式上传联调：设备令牌、MQTT 账号、CA PEM、presence/telemetry/
+   output/result schema、服务器 443/8883 可达性（见 `docs/08` 第 7 节）。
+4. `audio.configure` 任务：已把 `minutes` 更新到 RAM，但未回 `/result`，
+   重启后恢复默认 `APP_RETENTION_MINUTES`。
+5. 上传任务持久化：设备重启会丢失未完成的保存请求。
+6. 内存/堆评估：MQTT/TLS + HTTPS/TLS 同时连接时的 mbedTLS 缓冲区。
+7. 凭据轮换与公开仓库历史中的 Wi-Fi 密码清理。
+8. 音效资产变更后重新生成 `animal_sounds.bin` 并提交。
+9. 开机从 SD 取 LOGO 的 I2C 长块读取：头 32 字节能读，第一个数据块后
+   总线死锁（`tx=HAL_BUSY`）。代码保留、默认关闭；尝试记录与排查建议见
+   `docs/09-logo-sd-i2c-handoff.md`。

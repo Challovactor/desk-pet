@@ -7,7 +7,7 @@
 
 - **ECW6700F**：录音、SD 环形存储、Wi-Fi 上传、喇叭回放；
 - **STM32F407VET6**：2.0 寸触摸屏事件桥，把触摸通过板间 I²C 通知 ECW6700；
-  开机驱动 4.2" 墨水屏显示一次 logo。
+  开机驱动 800×480 墨水屏显示一次 LOGO。
 
 > 早期 README 里的「STM32 采音 + PWA + 卡片服务」是长期产品架构设想，不是当前代码。
 > 当前版本的完整说明、引脚、构建烧录和排障记录见
@@ -19,16 +19,19 @@
 
 | 项目 | 状态 |
 |---|---|
-| CST816D 触摸 | ✅ 实机验证（chip id 0xB6、坐标正常） |
-| STM32 → ECW 板间 I²C（0x42） | ✅ 实机验证 |
-| PDM 麦克风 / I2S 初始化 | ✅ 初始化成功 |
-| SD 卡（软件 SPI） | ✅ 16GB 卡、512MB 环形区、持续写入 |
-| 30 秒回溯片段 | ✅ 触摸生成 1,920,000 字节片段 |
-| Wi-Fi 2.4GHz | ✅ 扫描、关联、获取 IP |
-| **音频实际内容** | ⚠️ 仅验证初始化与写卡，未回放/分析 PCM |
-| **HTTP 上传** | ⚠️ 客户端已实现；测试时服务器不可达 |
-| **喇叭回放** | ⚠️ 代码已编译进镜像，未实机试听 |
-| **墨水屏 logo** | ⚠️ 驱动已实现（UC8176），未实机验证 |
+| CST816D 触摸 | ✅ 实机验证（chip id 0xB6、单击/双击/上滑/下滑） |
+| STM32 → ECW 板间 I²C（0x42） | ✅ 实机验证（单次统计 link_ok=9、fail=0） |
+| PDM 麦克风 / I2S 初始化 | ✅ 实机验证；落盘改为 8kHz PCM（4:1 低通抽取） |
+| SD 卡（软件 SPI） | ✅ 写约 14KB/s（寄存器直写后），环形区 512MB |
+| 触摸回溯片段 | ✅ 30 秒片段（480,000 字节 @8kHz） |
+| Wi-Fi 2.4GHz | ✅ 上电约 5 秒拿到 IP；连接前预扫描、SNTP 30 秒保活 |
+| **音频内容** | ⚠️ 采集/回放代码已跑通，人声质量未试听确认 |
+| **v2 手势识别** | ✅ 实机验证（ECW 收到 0x11–0x14，单击触发音效与录音快照） |
+| **v2 情绪音效** | ⚠️ 4 个音效已写入 SD 并可回放；TTS（UART0 syn6288e）已驱动；SPK 模块需外部供电，是否出声待确认 |
+| **v2 正式上传** | ⚠️ 202、MQTT audio.export、GET job 认领已实测通过；SD 连续读会干扰 RF，当前快照限制 10 秒，四步上传完整闭环待硬件改善 |
+| HTTP 上传（v1 回退） | ⚠️ 客户端保留；服务器 8080 未开放 |
+| **喇叭回放** | ⚠️ I2S TX 与音效资产已跑通（`[play] done`），听感待确认 |
+| **墨水屏 LOGO** | ✅ SSD1677 系 800×480、九位 SPI，开机 3.7 秒全刷，实机确认 |
 | 蓝牙 | ➖ 当前需求不做 |
 
 ---
@@ -43,12 +46,12 @@
 ECW6700F（YL6700B）: MIC 接口 + 背面 SD 卡槽 + Wi-Fi 天线 + 喇叭（独立 SPK-OUT 口）
 ```
 
-- **ECW6700F**（YL6700B）外设接口：MIC 连接器（PDM 数字麦）、独立 SPK-OUT 口接喇叭
-  （板载 ES8311 codec + 功放，回放数字线与麦克风共用 MIC 连接器 I2S 线）、
-  SPI 接 SD 卡、UART 预留 TTS 语音合成模块（固件暂未驱动）；
+- **ECW6700F**（YL6700B）外设接口：MIC 连接器（PDM 数字麦）、独立 SPK-OUT
+  （U2 WAFER-GH1.25-5P：1=NC、2=LRCK、3=BCLK、4=DIN、5=GND；**纯 I2S，无供电，
+  喇叭模块需另接 3.3V/5V**）、SPI 接 SD 卡、UART0 驱动 syn6288e TTS 模块；
   蓝牙为芯片自带能力，当前固件未驱动。
-- **STM32F407**（2.0TP 模组）：CST816D 触摸走 I²C3；4.2EPD 墨水屏接口保留（硬件在位，
-  固件暂不驱动）。
+- **STM32F407**（2.0TP 模组）：CST816D 触摸走 I²C3；EPD 墨水屏走 SPI3 共享总线
+  （SSD1677 系 800×480、九位字、D/C 固定低），开机全刷显示一次 LOGO。
 - 板上拨动开关只切换 CH340 接到哪块板的 UART（ECW 或 STM32）；板间 I²C 不受影响。
 - 2.0TP 与 ECW 的完整引脚表见 [docs/06-ecw-bringup-2026-11-15.md](docs/06-ecw-bringup-2026-11-15.md) 第 2 节，
   接线与检查清单见 [docs/01-wiring.md](docs/01-wiring.md)。
@@ -59,12 +62,16 @@ ECW6700F（YL6700B）: MIC 接口 + 背面 SD 卡槽 + Wi-Fi 天线 + 喇叭（�
 
 ```
 PDM 麦克风 → I2S → PCM16LE 32kHz 单声道 → SD 裸扇区环形区（约 64KB/s）
-触摸（ECW I²C 从机 0x42 收到 0x01）
-  → 快照最近 N 秒（默认 30 秒）
-  → 上传队列（深度 4）
-  → POST /api/record（JSON 事件）
-  → POST /api/audio（WAV，流式读取）
-STM32 写 0x03 → ECW 暂停采集 → I2S TX 回放最近 N 秒 → 恢复采集
+STM32 手势识别（单击/双击/上滑/下滑）
+  → 板间 I²C 写 1 字节 0x11..0x14
+  → ECW 快照最近 N 秒并加入上传队列（保持 v1 语义）
+  → ECW 暂停采集 → 播放对应情绪音效（16 kHz）→ 恢复采集
+正式上传：POST /device/v1/recordings（设备令牌）
+  → MQTT/TLS 收 audio.export / GET 预检查
+  → 取最近 N 分钟 → 32k→16k + SHA256
+  → POST output 元数据 → PUT WAV → POST result
+v1 回退：POST /api/record + POST /api/audio（APP_UPLOAD_FORMAL=0）
+调试：STM32 写 0x03 → 回放最近 N 秒录音（32k→16k）
 ```
 
 - SD 使用裸扇区，从 LBA 2048 起把整张卡当环形缓冲区，不依赖 FATFS。
@@ -77,10 +84,14 @@ STM32 写 0x03 → ECW 暂停采集 → I2S TX 回放最近 N 秒 → 恢复采�
 
 | 路径 | 内容 |
 |---|---|
-| `ecw6700/` | ECW6700F 固件：采集、SD、环形存储、I²C 从机、喇叭回放、Wi-Fi/HTTP |
-| `stm32f407/` | STM32F407 固件：CST816D 触摸、I²C 主机事件、调试串口 |
+| `ecw6700/` | ECW6700F 固件：采集、SD、环形存储、I²C 从机、音效/回放、Wi-Fi/HTTP/MQTT |
+| `ecw6700/main/assets/animal_sounds.bin` | 4 个情绪音效的 16 kHz PCM blob（嵌入固件） |
+| `ecw6700/tools/build_sound_blob.py` | 从 `animal_audio/` 生成音效 blob 的脚本 |
+| `stm32f407/` | STM32F407 固件：CST816D 触摸/手势、I²C 主机事件、调试串口 |
 | `docs/01-wiring.md` | 接线与硬件：总线分工、两板引脚表、检查清单 |
-| `docs/06-ecw-bringup-2026-11-15.md` | 当前版本的架构、引脚、构建烧录、排障记录 |
+| `docs/06-ecw-bringup-2026-11-15.md` | v1 架构、引脚、构建烧录、排障记录 |
+| `docs/07-v2-gesture-sound.md` | v2 手势识别与情绪音效 |
+| `docs/08-v2-server-upload.md` | v2 desk-recorder/v1 正式上传 |
 | `docs/README.md` | 文档索引 |
 | `AGENT.md` | 给 AI/自动化代理的项目工作指南 |
 
@@ -161,7 +172,17 @@ bash desk-pet/stm32f407/build_firmware.sh
 | `APP_CLIP_SECONDS` | 回溯秒数，默认 30 |
 | `APP_PDM_SAMPLE_RATE` | I2S 采样率，默认 32000 |
 | `APP_SD_START_LBA` | SD 环形区起始 LBA，默认 2048 |
-| `APP_PLAYBACK_VOLUME_DIV` | 喇叭回放音量衰减，默认 10 |
+| `APP_PLAYBACK_VOLUME_DIV` | 调试回放音量衰减，默认 10 |
+| `APP_SOUND_VOLUME_DIV` | 情绪音效音量衰减，默认 1（资产已归一化） |
+| `APP_CODEC_CONFIG_ENABLE` | 本板 SPK 是纯 I2S，默认 0（不执行 ES8311 I2C） |
+| `APP_CODEC_I2C_NUM` / `APP_CODEC_I2C_ADDR` | 其它硬件用的 ES8311 控制口（默认 I2C0/0x18） |
+| `APP_CODEC_VOLUME` | codec 音量寄存器 0x32（仅启用 codec 时） |
+| `APP_SOUND_TEST_TONE` | 1=长按播 1 kHz 测试音（诊断用，验收后设 0） |
+| `APP_UPLOAD_FORMAL` | 1=desk-recorder/v1；0=v1 明文 HTTP |
+| `APP_DEVICE_TOKEN` | 设备令牌（必填，当前占位符） |
+| `APP_MQTT_HOST` / `APP_MQTT_PORT` | MQTT/TLS，默认服务器 IP:8883 |
+| `APP_MQTT_USERNAME` / `APP_MQTT_PASSWORD` | MQTT 账号（必填，当前占位符） |
+| `APP_RETENTION_MINUTES` | 正式上传的最近分钟数，默认 10 |
 | `APP_UPLOAD_QUEUE_LEN` | 上传队列深度，默认 4 |
 
 > 公开仓库中的配置应使用占位符；真实凭据不要提交。
@@ -172,9 +193,13 @@ bash desk-pet/stm32f407/build_firmware.sh
 
 | 命令 | 值 | 方向 | 含义 |
 |---|---|---|---|
-| TOUCH | 0x01 | STM32 → ECW | 触摸，取最近 N 秒并上传 |
+| TOUCH | 0x01 | STM32 → ECW | 仅录音/上传（长按、横向滑动、未知手势） |
 | PING | 0x02 | STM32 → ECW | 上电心跳（预留） |
-| PLAY | 0x03 | STM32 → ECW | 喇叭回放最近 N 秒（回放期间暂停采集） |
+| PLAY | 0x03 | STM32 → ECW | 调试：回放最近 N 秒录音（32k→16k） |
+| GESTURE_CLICK | 0x11 | STM32 → ECW | 单击 → 录音/上传 + 正面音效 |
+| GESTURE_DOUBLE | 0x12 | STM32 → ECW | 双击 → 录音/上传 + 负面音效 |
+| GESTURE_UP | 0x13 | STM32 → ECW | 上滑 → 录音/上传 + 正面音效 |
+| GESTURE_DOWN | 0x14 | STM32 → ECW | 下滑 → 录音/上传 + 负面音效 |
 
 - STM32 是 I²C 主机，ECW 是从机；地址 7 位 0x42（HAL 8 位 0x84）。
 - 链路只做“主机写 1 字节”，不实现变长帧/应答，避免 HAL 从机时序问题。
@@ -183,24 +208,28 @@ bash desk-pet/stm32f407/build_firmware.sh
 
 ## 八、服务器通信
 
-当前固件实现的是**可配置明文 HTTP**：
+v2 默认实现 `desk-recorder/v1` 的**设备主动保存**（`APP_UPLOAD_FORMAL=1`）：
 
-1. `POST /api/record`：JSON 记录事件（`clip_id`、秒数、字节数、采样率）；
-2. `POST /api/audio`：WAV（44 字节头 + PCM16LE 单声道 32kHz），body 从 SD 流式读取；
-3. 只有 HTTP 2xx 才算成功，失败重试 2 次；`X-Clip-Id` 可用于服务端幂等去重。
+1. `POST /device/v1/recordings`（Bearer 设备令牌 + `Idempotency-Key`）申请保存；
+2. MQTT/TLS `commands/events` 收 `audio.export`，或 `GET /device/v1/jobs/{id}` 预检查；
+3. 取最近 `APP_RETENTION_MINUTES` 分钟，32k→16k 并计算 SHA256；
+4. `POST .../output` 元数据 → `PUT .../output/blob` 流式 WAV → `POST .../result`。
 
-服务器侧的正式协议（`desk-recorder/v1`）是 **MQTT 3.1.1+TLS（8883）+ HTTPS（443）**、
-App 发起保存任务、16kHz/单声道/16-bit WAV、UTC 校时、SHA256、四步上传和任务持久化。
-它与当前实现**不兼容**，按当前产品决定暂缓改造；接入前需要设备凭据、CA 证书、
-服务端端口放行，以及音频格式/保留分钟数/校时/持久化等改动。详见
-[docs/06-ecw-bringup-2026-11-15.md](docs/06-ecw-bringup-2026-11-15.md) 第 6 节。
+v1 的明文 HTTP（`POST /api/record` + `POST /api/audio`，32kHz/30 秒）保留在
+`app_net.c`，设 `APP_UPLOAD_FORMAL=0` 可回退。
+
+正式协议仍需现场提供：`APP_DEVICE_TOKEN`、MQTT 用户名/密码、CA PEM，
+以及服务端 presence/telemetry/output/result JSON 的字段定义。详见
+[docs/08-v2-server-upload.md](docs/08-v2-server-upload.md)。
 
 ---
 
 ## 九、文档
 
 - [docs/README.md](docs/README.md) — 文档索引
-- [docs/06-ecw-bringup-2026-11-15.md](docs/06-ecw-bringup-2026-11-15.md) — 实机落地、引脚、构建烧录、9 条关键修复、服务器协议现状、安全与限制
+- [docs/06-ecw-bringup-2026-11-15.md](docs/06-ecw-bringup-2026-11-15.md) — v1 实机落地、引脚、构建烧录、关键修复
+- [docs/07-v2-gesture-sound.md](docs/07-v2-gesture-sound.md) — v2 手势/音效/资产入库/ES8311 顺序
+- [docs/08-v2-server-upload.md](docs/08-v2-server-upload.md) — v2 desk-recorder/v1 上传与待确认 schema
 - [ecw6700/README.md](ecw6700/README.md) — ECW6700F 子工程说明
 - [stm32f407/README.md](stm32f407/README.md) — STM32F407 子工程说明
 - [AGENT.md](AGENT.md) — 给 AI/自动化代理的工作指南
@@ -210,14 +239,21 @@ App 发起保存任务、16kHz/单声道/16-bit WAV、UTC 校时、SHA256、四�
 ## 十、已知限制
 
 - 音频实际内容未验证：需导出 WAV 或服务端保存后确认不是静音/噪声。
-- HTTP 上传未闭环：测试环境服务器不可达（PC 测试 80/8080 均超时）。
-- 喇叭回放未实机试听；回放会暂停采集，播完恢复。
-- SD 为裸扇区存储，PC 不能直接读取；LBA 2048 之后的数据会被覆盖。
+- v2 手势已上板验证（STM32 手势/链路/墨水屏正常）；ECW I2S TX 也已完成
+  DMA（`[play] done`），但 SPK 模块仍无声：SPK pin 1 是 NC，模块必须
+  另接 3.3V/5V；详见 [docs/07](docs/07-v2-gesture-sound.md) 第 7–8 节。
+- v2 正式上传已用真实凭据联调：Wi-Fi/MQTT/TLS 均通，服务端 v0.1.1
+  `POST /device/v1/recordings` 已存在；在线握手（presence/telemetry）
+  刚按服务端规则修正，待复测。详见 [docs/08](docs/08-v2-server-upload.md)。
+- 喇叭回放会暂停采集约 1–2 秒，播完自动恢复。
+- SD 为裸扇区存储，PC 不能直接读取；LBA 1024–2047 是音效区，
+  LBA 2048 之后是录音环形区，都会被覆盖。
 - 软件 SPI 约 0.5–1MHz；提高采样率/双声道前需评估总线占用。
 - 上传队列深度 4，连续快速触摸会丢；可按产品语义调整。
-- 没有 RTC/墙钟，`clip_id` 为自增计数；接入正式服务器前需补 UTC 时间。
+- 没有 RTC/墙钟，`clip_id` 为自增计数；正式协议的时间戳由服务器给出。
 - 没有看门狗；任务卡死只能断电。
-- `叫声音效/` 的音效资产当前未被代码引用；`app_playback` 回放的是刚录制的片段。
+- `animal_audio/` 已通过 `build_sound_blob.py` 生成 `animal_sounds.bin` 并被
+  固件引用；`app_playback` 同时支持情绪音效和 v1 的片段回放。
 
 ---
 

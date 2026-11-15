@@ -58,10 +58,40 @@ static void sd_select(int on)
     drv_gpio_write(s_cs_gpio, on ? 0u : 1u);
 }
 
+/* 位翻转延时：初始化用保守值，卡就绪后切到快速值。
+ * 原实现固定 8 次空循环，实测读写只有约 10KB/s：480KB 快照要近 1 分钟，
+ * 期间 Wi-Fi 被饿死/受位翻转干扰，热点会把设备踢掉。 */
+static volatile unsigned s_sd_delay_loops = 8u;
+
 static void sd_delay(void)
 {
-    for (volatile unsigned i = 0; i < 8u; ++i) {
+    for (volatile unsigned i = 0; i < s_sd_delay_loops; ++i) {
     }
+}
+
+/* 寄存器直写：SDK 的 drv_gpio_write/drv_gpio_read 每次调用都会
+ * system_irq_save/restore，位翻转时一个字节要开关中断 16–24 次；连续读
+ * 480KB 就是上百万次关中断，Wi-Fi 的 ISR/信标处理被打断，热点会把设备
+ * 踢掉。这里直接操作 GPIO 的 DataOut/DataIn（RMW 无中断保护；应用中没有
+ * 其它任务同时改这几位，可接受）。 */
+/* GPIO 寄存器（chip_memmap.h: MEM_BASE_GPIO=0x20215000；
+ * gpio_reg_struct.h: DataIn @0x20, DataOut @0x24） */
+#define SD_GPIO_BASE            0x20215000u
+#define SD_GPIO_DATAIN          (*(volatile unsigned int *)(SD_GPIO_BASE + 0x20u))
+#define SD_GPIO_DATAOUT         (*(volatile unsigned int *)(SD_GPIO_BASE + 0x24u))
+
+static inline void sd_gpio_put(unsigned int pin, unsigned int level)
+{
+    unsigned int v = SD_GPIO_DATAOUT;
+
+    v &= ~(1u << pin);
+    v |= (level & 1u) << pin;
+    SD_GPIO_DATAOUT = v;
+}
+
+static inline unsigned int sd_gpio_get(unsigned int pin)
+{
+    return (SD_GPIO_DATAIN >> pin) & 1u;
 }
 
 static uint8_t bb_byte(uint8_t out)
@@ -69,15 +99,11 @@ static uint8_t bb_byte(uint8_t out)
     uint8_t in = 0;
 
     for (int b = 7; b >= 0; --b) {
-        drv_gpio_write(s_mosi_gpio, (out >> b) & 1u);
-        drv_gpio_write(s_sck_gpio, 1u);
+        sd_gpio_put(s_mosi_gpio, (out >> b) & 1u);
+        sd_gpio_put(s_sck_gpio, 1u);
         sd_delay();
-        {
-            unsigned v = 0;
-            (void)drv_gpio_read(s_miso_gpio, &v);
-            in = (uint8_t)((in << 1) | (v & 1u));
-        }
-        drv_gpio_write(s_sck_gpio, 0u);
+        in = (uint8_t)((in << 1) | (sd_gpio_get(s_miso_gpio)));
+        sd_gpio_put(s_sck_gpio, 0u);
         sd_delay();
     }
     return in;
@@ -457,9 +483,11 @@ int app_sd_init(void)
     }
 
     s_ready = 1;
-    os_printf(LL_INFO, "[sd] ready: %lu sectors, %s addressing\r\n",
+    s_sd_delay_loops = APP_SD_FAST_LOOPS;
+    os_printf(LL_INFO, "[sd] ready: %lu sectors, %s addressing, fast_loops=%u\r\n",
               (unsigned long)s_sectors,
-              s_block_addressed ? "block" : "byte");
+              s_block_addressed ? "block" : "byte",
+              (unsigned)APP_SD_FAST_LOOPS);
     return 0;
 }
 

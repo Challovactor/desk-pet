@@ -2,15 +2,18 @@
 
 ## 职责（2026-11 迭代后）
 
-本板负责两件事：**检测 2.0TP 触摸屏的按下并通过板间 I²C 通知 ECW6700**，以及
-**开机在 4.2" 墨水屏上显示一次 logo**。
-录音、SD 存储、Wi-Fi 上传、蓝牙都已在本次需求变更中移除。
+本板负责两件事：**检测 2.0TP 触摸屏的手势并通过板间 I²C 通知 ECW6700**，以及
+**开机在 800×480 墨水屏上显示一次 LOGO（黑白灰抖动）**。
+录音、SD 存储、Wi-Fi 上传、蓝牙都在 ECW 侧。
 
 ```
-2.0TP (CST816D) --I2C3--> STM32 --I2C1 主机写 1 字节 0x01--> ECW6700 (从机 0x42)
+2.0TP (CST816D) --I2C3--> STM32 手势状态机
+    --I2C1 主机写 1 字节 0x11..0x14/0x01--> ECW6700 (从机 0x42)
 ```
 
-- 触摸按下沿触发，800ms 去抖，整屏任意位置都算一次"记录"；
+- v2 识别单击、双击、上滑、下滑；优先用 CST816 寄存器 0x01 的硬件 GestureID，
+  不可用时用按下时长/位移/两次点击间隔做软件兜底；
+- 单击延迟 300 ms 发送，以区分双击；长按/横向滑动发 0x01（仅录音）；
 - 只发 1 字节命令，不做变长帧/应答，避免 HAL 从机时序问题；
 - I²C1 发送失败做 9 个 SCL 脉冲 + STOP 的总线恢复，最多重试 3 次；
 - 触摸控制器初始化失败会每 2 秒重试；连续 5 次读失败视为掉线并重初始化；
@@ -23,18 +26,27 @@
 | 2.0TP 触摸（CST816D） | I2C3 控制器 0x15 | PA8=SCL, PC9=SDA, PD15=RESET, PD10=INT（轮询，不用 INT） |
 | 板间链路 | I2C1 主机 100kHz | PB8=SCL, PB9=SDA → ECW6700 IO24/IO23 |
 | 调试串口 | USART3 | PB10=TX, PB11=RX, 115200 8N1 |
-| 4.2EPD 墨水屏 | SPI3 共享总线 | UC8176 COF，400×300 黑白：SCK=PC10, MOSI=PC12（与 LCD 共用）, CS=PA15, D/C=PC13（与 LCD WR 共用）, RES=PA13, BUSY=PD8（高=忙） |
+| EPD 墨水屏 | SPI3 共享总线 | SSD1677 系，800×480 1bit：SCK=PC10, MOSI=PC12（与 LCD 共用）, CS=PA15, RES=PA13, BUSY=PD8（高=忙）；D/C=PC3 固定低（9-bit 字模式） |
 
 ## 墨水屏（app_epd.c）
 
-- 驱动：UC8176/UC8276（微雪 4.2" V2 兼容 COF，模块自带升压），LUT 走 OTP，全刷约 3–5s；
-- 开机显示一次 `epd_logo_bits`（400×300 黑白，1=白）后进入深度睡眠（0x10）；
-- BUSY 等待带 20s 超时，屏未接/失败只打日志，不阻塞触摸主循环；
-- 换 logo：`python3 tools/gen_epd_logo.py <logo.png>`（需 Pillow）重新生成
-  `stm32f407/main/epd_logo.c` 后重编译；无参数时生成内置 MOCE 占位图；
-- 引脚来源：`docs/interface/e-lnk.png`（4.2EPD 接口）+ SHIELD 网络名。
-  **注意**：D/C 与 LCD 的 WR 共用 PC13、CS=SPI_CS0=PA15 是从原理图推断的共总线接法，
-  上板若无反应优先核对这两根；RES=PA13 是 SWDIO，SWD 调试期间会被占用（烧录走 UART 不受影响）。
+- 驱动：SSD1677 系 COF，**800×480 1bit，整帧 48000 字节**（与已实机点亮的
+  `firmware-code-stm32-1115` 一致），SPI3 单线发送；
+- 命令/数据用 **9-bit 字**区分：D/C 固定低，bit8=0 命令、bit8=1 数据（MSB-first 拼包）；
+- 初始化序列与更新触发照搬参考实现（0x12/0x18/0x0C/0x01/0x11/0x3C/0x21/窗口/0x22=0xF7/0x20），
+  全刷实测约 3.7s；
+- 开机显示一次 `epd_logo_bits`（48000 字节，1=白）。图由
+  `python tools/build_logo_blob.py LOGO.png` 生成：先把 PNG 的 alpha 合成到白底
+  （直接转灰度会把透明背景变成黑底，v1 的整屏发黑就是这个问题），等比缩放进
+  800×480 居中，再用 8×8 Bayer 抖动成"黑白灰"；
+- SD 取图（ECW 的 LBA 1536 存有同款 48032 字节块）已实现但默认关闭
+  （`main.c` 的 `LOGO_FETCH_FROM_SD 0`）：ECW 的 I2C 从机长块 TX 在事务边界
+  会时钟拉伸、把总线拉死，触摸链路也会一起失效；内置图已满足开机显示；
+- BUSY 等待 8s 超时，屏未接/失败只打日志，不阻塞触摸主循环；
+- 完整的尝试与未解决问题（SD 取图的 I2C 总线死锁）见
+  `docs/09-logo-sd-i2c-handoff.md`；
+- 引脚：CS=PA15（SPI_CS0）、SCK=PC10、MOSI=PC12、RES=PA13（SWDIO，SWD 调试期间被占用，
+  串口 Bootloader 烧录不受影响）、BUSY=PD8。
 
 STM32 作为 I²C 主机时，HAL 的 `DevAddress` 必须是 8 位形式：`0x42 << 1 = 0x84`。
 ECW 侧 `drv_i2c_slave_open` 的 `addr_val` 是未左移的 7 位地址 `0x42`。
@@ -43,8 +55,12 @@ ECW 侧 `drv_i2c_slave_open` 的 `addr_val` 是未左移的 7 位地址 `0x42`�
 
 | 命令 | 值 | 含义 |
 |---|---|---|
-| `LINK_EVT_TOUCH` | 0x01 | 用户触摸，ECW 取最近 N 秒并上传 |
+| `LINK_EVT_TOUCH` | 0x01 | 仅录音/上传（长按、横向滑动、未知手势） |
 | `LINK_EVT_PING` | 0x02 | 上电心跳（预留） |
+| `GESTURE_CLICK` | 0x11 | 单击 → 录音/上传 + 正面音效 |
+| `GESTURE_DOUBLE` | 0x12 | 双击 → 录音/上传 + 负面音效 |
+| `GESTURE_UP` | 0x13 | 上滑 → 录音/上传 + 正面音效 |
+| `GESTURE_DOWN` | 0x14 | 下滑 → 录音/上传 + 负面音效 |
 
 ## 构建
 

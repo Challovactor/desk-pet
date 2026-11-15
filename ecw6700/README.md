@@ -5,7 +5,7 @@
 ECW6700F 是唯一承担"录音 + 存储 + 上传"的板子：
 
 ```
-PDM 麦克风 --I2S--> 软件抽取 PCM16 32kHz --> SPI1 SD 裸扇区环形区（持续写）
+PDM 麦克风 --I2S--> 32kHz PCM16 --> 4:1 低通抽取 8kHz --> SPI1 SD 裸扇区环形区（持续写，16KB/s）
                                                     │
 STM32 --I2C 从机 0x42 收到 0x01（触摸）───────────────┤
                                                     ▼
@@ -15,11 +15,20 @@ STM32 --I2C 从机 0x42 收到 0x01（触摸）───────────
 - 没有蓝牙、没有墨水屏；
 - STM32 只发 1 字节触摸命令，ECW 作 I²C 从机接收；
 - 录音持续写入 SD 环形区，触摸时回溯最近 `APP_CLIP_SECONDS` 秒；
-- 喇叭经模块上独立的 SPK-OUT 口出声（板载 codec/功放）；回放的 I2S 数字线与麦克风
+- 喇叭经模块上独立的 SPK-OUT 口出声；该口是纯 I2S
+  （U2 GH1.25-5P：1=NC、2=LRCK、3=BCLK、4=DIN、5=GND），模块需另接
+  3.3V/5V，pin 1 不供电；回放的 I2S 数字线与麦克风
   共用 MIC 连接器（半双工）：STM32 发 `0x03` 时暂停采集，
   把最近 N 秒录音从 I2S TX 回放，播完自动恢复采集；
 - Wi-Fi STA 连接由本应用接管（关闭 SDK 的 NV 自动连接）；
-- 服务器先按可配置 HTTP 实现，协议隔离在 `app_net.c`。
+- v2 起默认走 `desk-recorder/v1`（HTTPS + MQTT/TLS），v1 明文 HTTP 保留为回退；
+- 手势命令 `0x11–0x14` 同时触发录音快照/上传和情绪音效；
+- 4 个音效嵌入固件，首次启动写入 SD LBA 1024–2047；
+- 开机 LOGO（800×480 1bit，48032 字节块）写入资产区偏移 256 KB（LBA 1536），
+  供 STM32 取图；取图走 I2C 命令 `0x20`（magic 0x5A + seq/offset/len/校验），
+  但 STM32 端默认关闭该路径（SDK 从机长块 TX 会拉死总线）。
+- 详见 [docs/07-v2-gesture-sound.md](../docs/07-v2-gesture-sound.md) 和
+  [docs/08-v2-server-upload.md](../docs/08-v2-server-upload.md)。
 
 ## 源文件
 
@@ -31,8 +40,16 @@ STM32 --I2C 从机 0x42 收到 0x01（触摸）───────────
 | `app_sdspi.c` | SPI 模式 SD 卡（CMD0/8/55/41/58/16/9/17/24） |
 | `app_store.c` | 裸扇区环形存储与"最近 N 秒"读取 |
 | `app_link.c` | I²C 从机 0x42，接收 STM32 触摸命令 |
-| `app_playback.c` | 喇叭回放：暂停采集 -> I2S TX 播放最近 N 秒 -> 恢复采集 |
-| `app_net.c` | Wi-Fi STA + lwip socket + HTTP POST |
+| `app_playback.c` | 喇叭回放：暂停采集 -> I2S TX 16 kHz -> 恢复采集；ES8311 启动配置 |
+| `app_net.c` | Wi-Fi STA + lwip socket + v1 HTTP POST（回退） |
+| `app_assets.c` | 音效 blob 校验/首次入库/随机选择/读取 |
+| `app_sound.c` | 手势命令 -> 情绪类别；codec 启动任务 |
+| `app_resample.c` | 8 kHz -> 16 kHz 线性插值（上传/回放）；4:1 抽取在 app_audio |
+| `app_sounds_blob.c` | `.incbin animal_sounds.bin` |
+| `app_https.c` | mbedTLS HTTPS 客户端（普通/流式） |
+| `app_mqtt.c` | MQTT 3.1.1+TLS、presence/commands |
+| `app_upload.c` | desk-recorder/v1 四步上传、WAV/SHA256 |
+| `app_sha256.c` / `app_json.c` / `app_ca_cert.c` | 哈希/JSON/CA |
 | `board_support/` | 冻结的板级引脚绑定（I2C0 = IO24/23） |
 
 ## 必须修改的配置（`main/app_config.h`）
@@ -64,7 +81,7 @@ X-Clip-Id: 1
  "bytes":1920000,"sample_rate":32000,"format":"pcm_s16le"}
 ```
 
-2) 紧接着上传 WAV（44 字节头 + PCM16LE 单声道 32kHz）：
+2) 紧接着上传 WAV（44 字节头 + PCM16LE 单声道 16kHz，8k 录音升采样）：
 
 ```http
 POST /api/audio HTTP/1.1
@@ -85,7 +102,7 @@ body 从 SD 环形区流式读取，不在 RAM 里拼接整段录音。服务器
 - SPI 模式 SD（6 线），引脚：SCK=GPIO14、MISO=GPIO12、MOSI=GPIO13、CS=GPIO11；
 - 不使用 FATFS/文件，从 LBA 2048 起把整张卡当作环形缓冲区；
 - 每 4KB 写一次（8 个扇区），64KB/s 对应约 16 次/秒；
-- 只记录总写入字节数，"最近 N 秒" = 最后 `N × 64000` 字节，读取时按环偏移回绕；
+- 只记录总写入字节数，"最近 N 秒" = 最后 `N × 16000` 字节，读取时按环偏移回绕；
 - 上传期间采集继续写，N 秒窗口远小于环容量，不会被写指针追上；
 - 卡容量不足时给出警告，但不会停机；
 - 触摸事件进入深度 4 的队列，由独立上传任务消费；上传期间的新触摸不会丢；
@@ -133,7 +150,7 @@ C:/moce/MOCEWorkbench-data/tools/ecw6700-windows/flash/eswin_tool.exe \
 
 ```
 [app] MOCE memory-moment firmware
-[app] clip=30s rate=32000Hz 64000B/s
+[app] clip=30s rate=8000Hz 16000B/s
 [sd] ready: xxxxx sectors, block addressing
 [audio] PDM armed: 32000 Hz, 8192 B/read -> 1024 samples
 [link] i2c slave ready: addr=0x42

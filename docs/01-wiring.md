@@ -7,14 +7,14 @@
 
 | 通道 | 接法 | 用途 | 带宽 |
 |---|---|---|---|
-| 板间 I²C | F407 I2C1（PB8/PB9，主机）↔ ECW6700 I2C0（IO24/IO23，从机 0x42） | 1 字节命令：0x01 触摸 / 0x02 PING / 0x03 回放 | 100 kHz，足够 |
+| 板间 I²C | F407 I2C1（PB8/PB9，主机）↔ ECW6700 I2C0（IO24/IO23，从机 0x42） | 1 字节命令：0x01 触摸 / 0x02 PING / 0x03 回放 / 0x11–0x14 手势 | 100 kHz，足够 |
 | F407 调试串口 | USART3（PB10=TX / PB11=RX） | F407 本板日志，115200 8N1，不跨板 | — |
 | MIC 连接器 | ECW6700 BOARD_I2S_0（WS=IO6 / SCK=IO7 / SD=IO8，5 线：3V3/WS/SCK/SD/GND） | PDM 数字麦克风，32 kHz；第 4 脚 IO3 保留 MCLK | — |
-| SPK-OUT | ECW6700 板载 codec/功放（ES8311）输出 | 喇叭；回放数据经 MIC 连接器 I2S 线送板载 codec（半双工，回放时暂停采集） | — |
+| SPK-OUT | U2 WAFER-GH1.25-5PWB：1=NC、2=LRCK、3=BCLK、4=DIN、5=GND（屏蔽 6/7=GND） | **纯 I2S 输出，不含供电/ES8311 I2C**；喇叭模块必须另接 3.3V/5V。回放时暂停采集 | — |
 | SD 卡 | ECW6700 IO14(SCK) / IO12(MISO) / IO13(MOSI) / IO11(CS) | **软件 SPI**（GPIO 位翻转）SPI 模式裸扇区环形缓冲，从 LBA 2048 起 | 约 0.5–1 MHz |
 | TTS | ECW6700 UART（模组自有引脚） | 文本转语音模块，保留接法，固件暂未驱动 | — |
 | 2.0TP | F407 I2C3（PA8=SCL / PC9=SDA，RESET=PD15，INT=PD10 轮询不用） | CST816D 触摸屏，7 位地址 0x15；模组 LCD 引脚见 §1，当前只上电不驱动 | — |
-| 4.2EPD | F407：SCK=PC10 / MOSI=PC12（SPI3，与 LCD 共用）/ CS=PA15 / D/C=PC13 / RES=PA13 / BUSY=PD8 | UC8176 COF 400×300 黑白，模块自带升压；开机显示一次 logo（见 `stm32f407/README.md`） | — |
+| EPD | F407：SCK=PC10 / MOSI=PC12（SPI3，与 LCD 共用）/ CS=PA15 / D/C=PC3（固定低）/ RES=PA13 / BUSY=PD8 | SSD1677 系 800×480 1bit，9-bit 字 SPI；开机显示一次 48000 字节 LOGO（见 `stm32f407/README.md`） | — |
 
 **为什么音频不过板：** 录音（PDM 采集）、存储（SD 环形区）、上传（Wi-Fi HTTP）、
 回放（喇叭）全部在 ECW6700 侧完成，板间 I²C 只传 1 字节命令。
@@ -39,7 +39,7 @@ PB10/PB11 现在是 F407 的调试串口，不再承载音频。
 | 调试串口 RX | PB11 | USART3_RX | |
 | 4.2EPD BUSY | PD8 | GPIO 输入 | 高=忙 |
 | 4.2EPD RES | PA13 | GPIO 输出 | 注意：SWDIO 复用脚，SWD 调试期间被占用 |
-| 4.2EPD D/C | PC13 | GPIO 输出 | 与 LCD 的 WR 共用（共总线、各自 CS） |
+| EPD D/C | PC3 | GPIO 输出 | 9-bit 字模式固定拉低（命令/数据靠第 9 位区分） |
 | 4.2EPD CS | PA15 | GPIO 输出 | SPI_CS0；LCD 用 SPI_CS1=PC11 |
 | 4.2EPD SCK/MOSI | PC10 / PC12 | SPI3（AF6） | 与 2.0TP 模组 LCD 共享总线 |
 
@@ -52,7 +52,7 @@ ECW 侧 `drv_i2c_slave_open` 用未左移的 7 位地址 `0x42`。
 |---|---|---|
 | I2C SCL / SDA | IO24 / IO23 | 从机，地址 0x42（7 位），接 F407 PB8 / PB9 |
 | 麦克风 | MIC 连接器（BOARD_I2S_0） | PDM 数字麦：时钟 SCK=IO7，数据 SD=IO8，WS=IO6（主机驱动、麦克风不用） |
-| 喇叭 | 独立 SPK-OUT 口 | 板载 ES8311 codec + 功放输出；回放数字线与麦克风共用 MIC 连接器 I2S 线 |
+| 喇叭 | 独立 SPK-OUT（U2 GH1.25-5P） | 纯 I2S：1=NC / 2=LRCK / 3=BCLK / 4=DIN / 5=GND；模块需外部 3.3V/5V 供电。回放时暂停采集 |
 | SD 卡 | 背面 SD 卡槽：IO14/IO12/IO13 + CS=IO11 | 软件 SPI（GPIO 位翻转），CMD17/24，512B 扇区 |
 | TTS 模块 | 模组自有 UART | 保留接法，发文本即播报；固件暂未驱动 |
 
@@ -71,6 +71,16 @@ ECW 侧 `drv_i2c_slave_open` 用未左移的 7 位地址 `0x42`。
   固件从 LBA 2048 起把整卡当环形缓冲区，保留前 1 MB 不碰。
 - 建议 8 GB 以上、Class 10 / U1 的卡；杂牌卡在 SPI 模式初始化经常失败。
 - 用于录音的卡不要再存放其他数据（裸扇区写入会覆盖原文件系统区域）。
+
+### 4.1 v2 音效区
+
+- LBA **1024–2047**（512 KB）保留给 4 个情绪音效；首次启动由固件从
+  `.rodata` 写入，之后启动只校验 CRC。
+- 录音环形区仍从 LBA **2048** 开始，两者永不重叠。
+- 音效是 16 kHz/16-bit/单声道 PCM，每段从 512 字节边界开始；
+  blob 格式见 [07-v2-gesture-sound.md](07-v2-gesture-sound.md) 第 5 节。
+- 更换音效后必须重新运行 `ecw6700/tools/build_sound_blob.py` 并重新烧录；
+  固件会检测 CRC 变化并覆盖旧资产。
 
 ## 5. 接线检查清单（上电前逐条打勾）
 

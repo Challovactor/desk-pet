@@ -8,6 +8,7 @@ file(GLOB HAL_INC_DIRS "${MOCE_BSP_ROOT}/vendor/stm32f4xx-hal-driver-*/Inc")
 add_executable(firmware
   main.c
   app_epd.c
+  app_logo.c
   epd_logo.c
   syscalls.c
   ${HAL_SRCS}

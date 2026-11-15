@@ -7,7 +7,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# 工作区布局：<workspace>/desk-pet/stm32f407；工具链在工作区根目录下。
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TOOLS="$ROOT/MOCEWorkbench-data/tools/st-windows"
 BSP="$TOOLS/bsp/st/bsp/stm32f407/1.0.0-alpha.1"
 BOARD="$TOOLS/bsp/st/boards/stm32f407vet6/schematic-20261005-binding-1.0.0-alpha.1"

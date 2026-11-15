@@ -19,6 +19,7 @@
  */
 #include "stm32f4xx_hal.h"
 #include "app_epd.h"
+#include "app_logo.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,14 +28,37 @@
 #define TOUCH_I2C_ADDR      (0x15u << 1)  /* CST816D 7-bit 0x15 */
 #define LINK_I2C_ADDR7      0x42u         /* ECW6700 I2C 从机 7-bit 地址 */
 #define LINK_I2C_ADDR8      (LINK_I2C_ADDR7 << 1)
-#define LINK_EVT_TOUCH      0x01u         /* 触摸 -> 记录并上传 */
+#define LINK_EVT_TOUCH      0x01u         /* 触摸 -> 仅记录并上传 */
 #define LINK_EVT_PING       0x02u         /* 预留：心跳 */
+/* v2 手势命令：ECW 收到后同时做录音快照/上传，并播放对应情绪音效。 */
+#define LINK_EVT_GESTURE_CLICK   0x11u    /* 单击 -> 正面 */
+#define LINK_EVT_GESTURE_DOUBLE  0x12u    /* 双击 -> 负面 */
+#define LINK_EVT_GESTURE_UP      0x13u    /* 上滑 -> 正面 */
+#define LINK_EVT_GESTURE_DOWN    0x14u    /* 下滑 -> 负面 */
 
 #define TOUCH_POLL_MS       20u
-#define TOUCH_DEBOUNCE_MS   800u
 #define TOUCH_RETRY_MS      2000u
 #define LINK_TX_TIMEOUT_MS  30u
 #define LINK_RETRY          3u
+
+/* CST816 系列寄存器 0x01 的 GestureID 编码（Hynitron 常见定义）。 */
+#define CST_GESTURE_NONE        0x00u
+#define CST_GESTURE_SLIDE_UP    0x01u
+#define CST_GESTURE_SLIDE_DOWN  0x02u
+#define CST_GESTURE_SLIDE_LEFT  0x03u
+#define CST_GESTURE_SLIDE_RIGHT 0x04u
+#define CST_GESTURE_CLICK       0x05u
+#define CST_GESTURE_DOUBLE      0x0Bu
+#define CST_GESTURE_LONG_PRESS  0x0Cu
+
+/* 软件兜底识别：硬件 GestureID 不可用时，用按下时长/位移/两次点击间隔判断。 */
+#define TAP_MAX_MS          400u
+#define TAP_MAX_PX          25u
+#define SWIPE_MIN_PX        45u
+#define LONG_PRESS_MS       600u
+#define CLICK_WINDOW_MS     300u   /* 单击延迟发送，等待可能的第二击 */
+#define EVENT_GAP_MS        120u   /* 两条命令之间的最小间隔 */
+#define GESTURE_GRACE_MS    200u   /* 释放后等待硬件 GestureID 的宽限 */
 
 /* ------------------------------------------------------------- HAL 句柄 */
 static I2C_HandleTypeDef hi2c1;   /* 板间链路，主机 */
@@ -47,6 +71,27 @@ static volatile uint32_t stat_link_ok;
 static volatile uint32_t stat_link_fail;
 static volatile uint32_t stat_touch_err;
 static volatile uint32_t stat_bus_recover;
+static volatile uint32_t stat_gesture_click;
+static volatile uint32_t stat_gesture_double;
+static volatile uint32_t stat_gesture_up;
+static volatile uint32_t stat_gesture_down;
+static volatile uint32_t stat_gesture_fallback;
+
+/* 手势状态机 */
+static uint8_t  last_hw_gesture;
+static uint32_t last_hw_gesture_ms;
+/* 部分 CST816D 批次不会清零寄存器 0x01：一次点击后 GestureID 一直粘住。
+ * 这里记下“按下前就已经粘在寄存器里的值”，本次按下期间同样的值不算新事件，
+ * 交给软件兜底判定；只有值发生变化才当作硬件手势。 */
+static uint8_t  hw_gesture_latched;
+static uint8_t  hw_gesture_baseline;
+static uint32_t last_event_ms;
+static uint32_t press_ms;
+static uint16_t press_x, press_y;
+static uint16_t last_x, last_y;
+static int      press_active;
+static int      hw_gesture_seen;
+static uint32_t pending_click_ms;
 
 /* ----------------------------------------------------------------- 日志 */
 static void log_printf(const char *fmt, ...)
@@ -213,6 +258,12 @@ static void i2c1_bus_recover(void)
     gpio_af(GPIOB, GPIO_PIN_9, GPIO_AF4_I2C1, GPIO_MODE_AF_OD, GPIO_PULLUP);
     __HAL_RCC_I2C1_CLK_ENABLE();   /* DeInit 会关时钟，Init 不会重新开 */
     (void)HAL_I2C_Init(&hi2c1);
+}
+
+/* 供 app_logo.c 在 I2C 读事务失败后恢复总线。 */
+void logo_bus_recover(void)
+{
+    i2c1_bus_recover();
 }
 
 /* --------------------------------------------------------------- 触摸驱动 */
@@ -455,8 +506,9 @@ static int touch_init(void)
     return 0;
 }
 
-/* 返回 1 表示读到有效触摸信息；down=1 表示当前有单指按下 */
-static int touch_poll(int *down, uint16_t *x, uint16_t *y)
+/* 返回 0 表示读到有效触摸信息；down=1 表示当前有单指按下。
+ * gesture 是 CST816 GestureID（0 表示无手势）。 */
+static int touch_poll(int *down, uint8_t *gesture, uint16_t *x, uint16_t *y)
 {
     uint8_t d[6] = {0};
 
@@ -466,6 +518,7 @@ static int touch_poll(int *down, uint16_t *x, uint16_t *y)
         return -1;
     }
     /* d = [gesture, finger_num, xh, xl, yh, yl] */
+    *gesture = d[0];
     *down = ((d[1] & 0x0fu) == 1u);
     if (*down) {
         *x = (uint16_t)(((d[2] & 0x0fu) << 8) | d[3]);
@@ -508,13 +561,210 @@ static int link_send_retry(uint8_t cmd)
     return -1;
 }
 
+/* ------------------------------------------------------------ 手势状态机 */
+static uint32_t release_ms;
+static int release_pending;
+
+static const char *cmd_name(uint8_t cmd)
+{
+    switch (cmd) {
+    case LINK_EVT_GESTURE_CLICK:  return "click/positive";
+    case LINK_EVT_GESTURE_DOUBLE: return "double/negative";
+    case LINK_EVT_GESTURE_UP:     return "swipe-up/positive";
+    case LINK_EVT_GESTURE_DOWN:   return "swipe-down/negative";
+    default:                      return "touch/record-only";
+    }
+}
+
+static void emit_event(uint8_t cmd, const char *why)
+{
+    uint32_t now = HAL_GetTick();
+
+    if ((now - last_event_ms) < EVENT_GAP_MS) {
+        /* 两条命令太近时合并/丢弃，避免 ECW 的 1 字节 I2C 缓冲被灌满。 */
+        log_printf("[stm32] %s suppressed (event gap)\r\n", why);
+        return;
+    }
+    last_event_ms = now;
+    stat_touch_events++;
+    if (link_send_retry(cmd) == 0) {
+        log_printf("[stm32] %s -> cmd 0x%02X %s (#%lu)\r\n",
+                   why, cmd, cmd_name(cmd),
+                   (unsigned long)stat_touch_events);
+    } else {
+        log_printf("[stm32] %s -> link FAILED\r\n", why);
+    }
+}
+
+static void flush_pending_click(uint32_t now)
+{
+    if (pending_click_ms != 0u &&
+        (now - pending_click_ms) >= CLICK_WINDOW_MS) {
+        pending_click_ms = 0u;
+        stat_gesture_click++;
+        emit_event(LINK_EVT_GESTURE_CLICK, "single click");
+    }
+}
+
+static int is_known_gesture(uint8_t gesture)
+{
+    switch (gesture) {
+    case CST_GESTURE_SLIDE_UP:
+    case CST_GESTURE_SLIDE_DOWN:
+    case CST_GESTURE_SLIDE_LEFT:
+    case CST_GESTURE_SLIDE_RIGHT:
+    case CST_GESTURE_CLICK:
+    case CST_GESTURE_DOUBLE:
+    case CST_GESTURE_LONG_PRESS:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void handle_hw_gesture(uint8_t gesture, uint32_t now, uint16_t x, uint16_t y)
+{
+    /* 同一个 GestureID 可能连续多轮保持非 0；只在变化/超时后处理一次。 */
+    if (gesture == last_hw_gesture &&
+        (now - last_hw_gesture_ms) < 600u) {
+        return;
+    }
+    last_hw_gesture = gesture;
+    last_hw_gesture_ms = now;
+
+    /* 未识别的字节（可能是别的状态位）不要压制软件兜底。 */
+    if (!is_known_gesture(gesture)) {
+        log_printf("[stm32] unknown gesture byte 0x%02X (fallback enabled)\r\n",
+                   gesture);
+        return;
+    }
+
+    hw_gesture_latched = gesture;
+    if (!hw_gesture_seen && gesture == hw_gesture_baseline) {
+        /* 上一次触摸遗留的粘滞值，本次按下没有产生新手势：交给软件兜底。 */
+        return;
+    }
+
+    hw_gesture_seen = 1;
+    release_pending = 0;
+
+    switch (gesture) {
+    case CST_GESTURE_CLICK:
+        if (pending_click_ms != 0u &&
+            (now - pending_click_ms) < CLICK_WINDOW_MS) {
+            /* 某些批次把双击拆成两次 CLICK：第二次到达即判双击。 */
+            pending_click_ms = 0u;
+            stat_gesture_double++;
+            emit_event(LINK_EVT_GESTURE_DOUBLE, "double click (two CLICKs)");
+        } else {
+            pending_click_ms = now;
+        }
+        break;
+    case CST_GESTURE_DOUBLE:
+        pending_click_ms = 0u;
+        stat_gesture_double++;
+        emit_event(LINK_EVT_GESTURE_DOUBLE, "double click");
+        break;
+    case CST_GESTURE_SLIDE_UP:
+        pending_click_ms = 0u;
+        stat_gesture_up++;
+        emit_event(LINK_EVT_GESTURE_UP, "swipe up");
+        break;
+    case CST_GESTURE_SLIDE_DOWN:
+        pending_click_ms = 0u;
+        stat_gesture_down++;
+        emit_event(LINK_EVT_GESTURE_DOWN, "swipe down");
+        break;
+    case CST_GESTURE_SLIDE_LEFT:
+    case CST_GESTURE_SLIDE_RIGHT:
+        pending_click_ms = 0u;
+        emit_event(LINK_EVT_TOUCH, "horizontal swipe (record only)");
+        break;
+    case CST_GESTURE_LONG_PRESS:
+        pending_click_ms = 0u;
+        emit_event(LINK_EVT_TOUCH, "long press (record only)");
+        break;
+    default:
+        pending_click_ms = 0u;
+        log_printf("[stm32] unknown gesture 0x%02X -> record only\r\n", gesture);
+        emit_event(LINK_EVT_TOUCH, "unknown gesture");
+        break;
+    }
+}
+
+static uint16_t abs_diff(uint16_t a, uint16_t b)
+{
+    return a > b ? (uint16_t)(a - b) : (uint16_t)(b - a);
+}
+
+/* 硬件 GestureID 不可用时的软件兜底。释放后等 GESTURE_GRACE_MS 再判定，
+ * 给触摸控制器一个上报硬件手势的机会。 */
+static void handle_release_fallback(uint32_t now)
+{
+    uint32_t dur = now - press_ms;
+    uint32_t prev_click = pending_click_ms;
+    uint16_t dx = abs_diff(last_x, press_x);
+    uint16_t dy = abs_diff(last_y, press_y);
+
+    pending_click_ms = 0u;   /* 新的兜底判定覆盖旧的待定单击 */
+    if (dur < TAP_MAX_MS && dx < TAP_MAX_PX && dy < TAP_MAX_PX) {
+        /* 短按：可能是单击或双击的第二击。 */
+        if (prev_click != 0u &&
+            (now - prev_click) < CLICK_WINDOW_MS) {
+            stat_gesture_double++;
+            emit_event(LINK_EVT_GESTURE_DOUBLE, "double click (fallback)");
+        } else {
+            pending_click_ms = now;
+        }
+        stat_gesture_fallback++;
+        return;
+    }
+    if (dy > SWIPE_MIN_PX && dy > dx) {
+        stat_gesture_fallback++;
+        if (last_y < press_y) {
+            stat_gesture_up++;
+            emit_event(LINK_EVT_GESTURE_UP, "swipe up (fallback)");
+        } else {
+            stat_gesture_down++;
+            emit_event(LINK_EVT_GESTURE_DOWN, "swipe down (fallback)");
+        }
+        return;
+    }
+    if (dx > SWIPE_MIN_PX && dx > dy) {
+        stat_gesture_fallback++;
+        emit_event(LINK_EVT_TOUCH, "horizontal swipe (fallback, record only)");
+        return;
+    }
+    if (dur >= LONG_PRESS_MS) {
+        stat_gesture_fallback++;
+        emit_event(LINK_EVT_TOUCH, "long press (fallback, record only)");
+        return;
+    }
+    emit_event(LINK_EVT_TOUCH, "touch (fallback, record only)");
+}
+
 /* ------------------------------------------------------------------ main */
+
+/* 开机后从 ECW 的 SD 取高清 LOGO；内置位图先顶着，取到后再全刷覆盖。
+ * 取图按 128 字节分块，主循环每次只处理一块（约 30 ms），不长时间阻塞触摸。
+ *
+ * LOGO_FETCH_FROM_SD：ECW 的 I2C 从机长块 TX 在 SDK 驱动里会时钟拉伸，
+ * 事务边界容易把总线拉死（主机随后一直 HAL_BUSY），因此默认关闭；
+ * 内置位图已能正常显示，SD 文件保留给后续 OTA/UART 方案使用。 */
+#define LOGO_FETCH_FROM_SD  0
+static struct logo_fetch s_logo;
+static uint32_t s_ping_at;        /* 启动后延时发送的首次链路 ping */
+static int s_logo_state;          /* 0=等待重试 1=取图中 2=完成 3=放弃 */
+static int s_logo_tries;
+static uint32_t s_logo_next_try;
+
+#define LOGO_RETRY_MS       2000u
+#define LOGO_MAX_TRIES      40
+
 int main(void)
 {
     uint32_t last_poll = 0;
     uint32_t last_touch_init_try = 0;
-    uint32_t last_trigger;
-    int prev_down = 0;
     uint32_t last_stat = 0;
 
     HAL_Init();
@@ -522,10 +772,9 @@ int main(void)
     if (peripherals_init() != 0) {
         for (;;) { HAL_Delay(1000); }
     }
-    /* 允许开机立即触摸：把上次触发时间回拨一个去抖窗口 */
-    last_trigger = HAL_GetTick() - TOUCH_DEBOUNCE_MS;
 
-    log_printf("\r\n[stm32] touch bridge boot, link addr=0x%02X\r\n", LINK_I2C_ADDR7);
+    log_printf("\r\n[stm32] touch bridge boot (v2 gestures), link addr=0x%02X\r\n",
+               LINK_I2C_ADDR7);
 
     if (touch_init() != 0) {
         log_printf("[stm32] touch init failed, will retry\r\n");
@@ -533,20 +782,99 @@ int main(void)
         log_printf("[stm32] touch ready\r\n");
     }
 
-    /* 上电先告诉 ECW 一声（对端可能还没起来，失败无妨） */
-    (void)link_send(LINK_EVT_PING);
+    /* 不要在上电瞬间访问 ECW：它还在启动，I2C 引脚未配置时会锁死总线，
+     * 之后任何复位都解不开（实测 link_fail 持续 + tx=HAL_BUSY）。
+     * ECW 的 I2C 从机约 0.5 s 就绪，这里统一推迟到 8 s 之后再访问。 */
 
     /* 开机在墨水屏上显示一次 logo（失败只记日志，不阻塞触摸主循环） */
     if (epd_init() == 0) {
+        int logo_ret;
         log_printf("[stm32] epd ready\r\n");
-        log_printf("[stm32] epd logo %s\r\n",
-                   epd_show_logo() == 0 ? "done" : "FAILED (busy timeout)");
+        logo_ret = epd_show_logo();
+        log_printf("[stm32] epd logo %s refresh=%lums busy=%d\r\n",
+                   logo_ret == 0 ? "done" : "FAILED (busy timeout)",
+                   (unsigned long)epd_last_refresh_ms(),
+                   epd_busy_level());
+        if (logo_ret == 0 && epd_last_refresh_ms() < 500u) {
+            /* 真实全刷至少几百 ms；立即返回说明 BUSY 没有拉高，屏没响应。 */
+            log_printf("[stm32] epd WARN: refresh too fast, check panel/CS/DC wiring\r\n");
+        }
     } else {
         log_printf("[stm32] epd init failed, skip\r\n");
     }
 
+    /* ECW 启动需要十几秒（SD 资产校验），先等 1.5 s 再试取 SD 版 LOGO */
+#if LOGO_FETCH_FROM_SD
+    s_logo_state = 0;
+    s_logo_tries = 0;
+    s_logo_next_try = HAL_GetTick() + 8000u;
+#else
+    s_logo_state = 3;   /* 只用内置位图 */
+#endif
+    s_ping_at = HAL_GetTick() + 8000u;
+
     for (;;) {
         uint32_t now = HAL_GetTick();
+
+        /* 首次链路 ping：推迟到 ECW 启动完成之后 */
+        if (s_ping_at != 0u && (int32_t)(now - s_ping_at) >= 0) {
+            s_ping_at = 0u;
+            (void)link_send(LINK_EVT_PING);
+        }
+
+        /* 从 SD 取 LOGO：每次循环只走一个分块 */
+        if (s_logo_state == 0 &&
+            (int32_t)(now - s_logo_next_try) >= 0) {
+            if (logo_fetch_start(&s_logo, &hi2c1) == 0) {
+                s_logo_state = 1;
+                log_printf("[stm32] logo fetch start %ux%u\r\n",
+                           (unsigned)s_logo.w, (unsigned)s_logo.h);
+            } else if (++s_logo_tries >= LOGO_MAX_TRIES) {
+                s_logo_state = 3;
+                log_printf("[stm32] logo fetch unavailable, keep built-in "
+                           "(tx=%d rx=%d resp=0x%02X)\r\n",
+                           logo_last_tx_status(), logo_last_rx_status(),
+                           logo_last_resp());
+            } else {
+                if ((s_logo_tries % 10) == 0) {
+                    log_printf("[stm32] logo start try %d (tx=%d rx=%d resp=0x%02X)\r\n",
+                               s_logo_tries, logo_last_tx_status(),
+                               logo_last_rx_status(), logo_last_resp());
+                }
+                s_logo_next_try = now + LOGO_RETRY_MS;
+            }
+        } else if (s_logo_state == 1) {
+            int r = logo_fetch_step(&s_logo);
+
+            if (r > 0) {
+                int shown = 0;
+
+                s_logo_state = 2;
+                if (epd_init() == 0) {
+                    shown = (epd_show_frame(logo_frame_data(&s_logo)) == 0);
+                }
+                log_printf("[stm32] logo from SD %s crc=%08lX refresh=%lums\r\n",
+                           shown ? "shown" : "FAILED",
+                           (unsigned long)logo_frame_crc(&s_logo),
+                           (unsigned long)epd_last_refresh_ms());
+            } else if (r < 0) {
+                s_logo_state = 0;
+                s_logo_next_try = now + 3000u;
+                if (++s_logo_tries >= LOGO_MAX_TRIES) {
+                    s_logo_state = 3;
+                    log_printf("[stm32] logo fetch failed, keep built-in "
+                               "(tx=%d rx=%d resp=0x%02X)\r\n",
+                               logo_last_tx_status(), logo_last_rx_status(),
+                               logo_last_resp());
+                } else {
+                    log_printf("[stm32] logo chunk error @%lu retry %d "
+                               "(tx=%d rx=%d resp=0x%02X)\r\n",
+                               (unsigned long)s_logo.next_off, s_logo_tries,
+                               logo_last_tx_status(), logo_last_rx_status(),
+                               logo_last_resp());
+                }
+            }
+        }
 
         /* 触摸控制器掉线/上电未就绪时周期重试 */
         if (!touch_ready && (now - last_touch_init_try) >= TOUCH_RETRY_MS) {
@@ -558,10 +886,11 @@ int main(void)
 
         if ((now - last_poll) >= TOUCH_POLL_MS) {
             int down = 0;
+            uint8_t gesture = CST_GESTURE_NONE;
             uint16_t x = 0, y = 0;
 
             last_poll = now;
-            if (touch_poll(&down, &x, &y) != 0) {
+            if (touch_poll(&down, &gesture, &x, &y) != 0) {
                 stat_touch_err++;
                 /* 连续读失败视为掉线，走重初始化 */
                 if (stat_touch_err >= 5u) {
@@ -570,28 +899,69 @@ int main(void)
                 }
             } else {
                 stat_touch_err = 0;
-                if (down && !prev_down && (now - last_trigger) >= TOUCH_DEBOUNCE_MS) {
-                    /* 按下沿 + 去抖：每次真实触摸只发一次 */
-                    last_trigger = now;
-                    stat_touch_events++;
-                    if (link_send_retry(LINK_EVT_TOUCH) == 0) {
-                        log_printf("[stm32] touch (%u,%u) -> evt sent (#%lu)\r\n",
-                                   (unsigned)x, (unsigned)y,
-                                   (unsigned long)stat_touch_events);
+
+                /* 硬件 GestureID：CST816 系列在寄存器 0x01 直接给出结果。
+                 * 只在“本次触摸周期内”采信，避免粘滞值在手指离开后无限重报。 */
+                if (gesture != CST_GESTURE_NONE) {
+                    int in_cycle = press_active ||
+                                   (release_pending &&
+                                    (now - release_ms) < GESTURE_GRACE_MS);
+                    if (in_cycle) {
+                        handle_hw_gesture(gesture, now, x, y);
+                    }
+                } else {
+                    last_hw_gesture = CST_GESTURE_NONE;
+                }
+
+                if (down) {
+                    if (!press_active) {
+                        press_active = 1;
+                        press_ms = now;
+                        press_x = x;
+                        press_y = y;
+                        last_x = x;
+                        last_y = y;
+                        hw_gesture_seen = 0;
+                        hw_gesture_baseline = hw_gesture_latched;
+                        last_hw_gesture = CST_GESTURE_NONE;
+                        release_pending = 0;
                     } else {
-                        log_printf("[stm32] touch (%u,%u) -> link FAILED\r\n",
-                                   (unsigned)x, (unsigned)y);
+                        last_x = x;
+                        last_y = y;
+                    }
+                } else if (press_active) {
+                    press_active = 0;
+                    if (!hw_gesture_seen) {
+                        /* 等一个宽限期，让控制器有机会补报硬件手势。 */
+                        release_ms = now;
+                        release_pending = 1;
                     }
                 }
             }
-            prev_down = down;
         }
 
-        /* 每 10s 打一行状态，便于现场确认链路 */
+        /* 释放后宽限期结束仍无硬件手势 -> 用软件判定。 */
+        if (release_pending && !hw_gesture_seen &&
+            (HAL_GetTick() - release_ms) >= GESTURE_GRACE_MS) {
+            release_pending = 0;
+            handle_release_fallback(HAL_GetTick());
+        }
+
+        /* 单击延迟发送：等待可能的第二击。 */
+        flush_pending_click(HAL_GetTick());
+
+        /* 每 10s 打一行状态，便于现场确认链路与手势分布 */
         if ((now - last_stat) >= 10000u) {
             last_stat = now;
-            log_printf("[stm32] stat touch=%lu ready=%d link_ok=%lu link_fail=%lu recover=%lu\r\n",
-                       (unsigned long)stat_touch_events, touch_ready,
+            log_printf("[stm32] stat touch=%lu click=%lu dbl=%lu up=%lu down=%lu fb=%lu "
+                       "ready=%d link_ok=%lu link_fail=%lu recover=%lu\r\n",
+                       (unsigned long)stat_touch_events,
+                       (unsigned long)stat_gesture_click,
+                       (unsigned long)stat_gesture_double,
+                       (unsigned long)stat_gesture_up,
+                       (unsigned long)stat_gesture_down,
+                       (unsigned long)stat_gesture_fallback,
+                       touch_ready,
                        (unsigned long)stat_link_ok,
                        (unsigned long)stat_link_fail,
                        (unsigned long)stat_bus_recover);

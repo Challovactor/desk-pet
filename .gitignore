@@ -1,8 +1,19 @@
 .DS_Store
 build/
+# 参考固件工作副本不提交
+firmware-code-*/
 *.o
 *.d
 *.elf
-*.bin
 *.hex
 *.map
+# 固件/烧录产物忽略，但情绪音效 blob 是必须提交的源资产：
+*.bin
+!ecw6700/main/assets/animal_sounds.bin
+!ecw6700/main/assets/logo.bin
+# 音效试听/脚本缓存
+ecw6700/tools/preview_wav/
+__pycache__/
+# 服务器凭据/证书（不要提交）
+server/key.txt
+server/ca.crt

@@ -22,11 +22,16 @@
 #include "oshal.h"
 #include "system_wifi.h"
 #include "system_event.h"
+#include "hal_sntp.h"
+#include "app_mqtt.h"
 
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "lwip/dns.h"
 #include "lwip/err.h"
+#include "lwip/netif.h"
+#include "lwip/etharp.h"
+#include "lwip/ip4_addr.h"
 
 #define NET_CONNECT_TIMEOUT_S   6
 /* SDK 的 lwipopts.h 定义 LWIP_SO_SNDRCVTIMEO_NONSTANDARD=1，
@@ -59,6 +64,10 @@ static sys_err_t net_wifi_event(void *ctx, system_event_t *event)
         s_sta_ip = 0;
         os_printf(LL_WARN, "[net] sta disconnected reason=%d\r\n",
                   event->event_info.disconnected.reason);
+        if ((int)event->event_info.disconnected.reason == 15) {
+            os_printf(LL_WARN, "[net] reason=15: AP 侧四次握手失败，"
+                               "优先核对热点密码/安全方式\r\n");
+        }
         break;
     case SYSTEM_EVENT_STA_CONNECTION_LOST:
     case SYSTEM_EVENT_STA_STOP:
@@ -431,6 +440,7 @@ static int net_wifi_connect(void)
 }
 
 /* 上板诊断：扫描并打印实际看到的 AP 列表，用于判断射频/天线是否工作。 */
+#if APP_WIFI_SCAN_DEBUG
 static void net_scan_debug(void)
 {
     wifi_scan_config_t cfg;
@@ -442,7 +452,7 @@ static void net_scan_debug(void)
         os_printf(LL_ERR, "[net] scan start failed\r\n");
         return;
     }
-    for (int i = 0; i < 25 && sys_wifi_scan_get_count() <= 0; ++i) {
+    for (int i = 0; i < 50 && sys_wifi_scan_get_count() <= 0; ++i) {
         os_msleep(200);
     }
     n = sys_wifi_scan_get_count();
@@ -457,11 +467,46 @@ static void net_scan_debug(void)
     }
     (void)sys_wifi_scan_stop();
 }
+#endif /* APP_WIFI_SCAN_DEBUG */
+
+/* 关联一次在本 SDK 上常常要 20–50 秒（扫描 + 认证 + 四次握手 + DHCP）。
+ * 之前的实现按固定 30 秒 sta_stop/sta_start，正好把正在进行的四次握手
+ * 掐断：日志里 `tx eapol done:-12` → `sta disconnected reason=15`，
+ * 随后 AP 侧报 PSK 错误，形成“一直连不上”的假象。 */
+/* AP 的"不活跃设备踢线"通常按"多久没收到客户端上行帧"计。手机热点没有开关，
+ * 只能由设备自己定期发一个极小上行帧：ARP 请求网关即可（42 字节，开销可忽略）。
+ * 15 秒一次，远低于常见 60 秒阈值。 */
+#define NET_KEEPALIVE_MS        15000u
+#define NET_RESTART_QUIET_MS    90000u  /* 完全断开且无 IP 的等待时间 */
+#define NET_RESTART_HARD_MS     180000u /* 任何状态下无 IP 的硬上限 */
+#define NET_STOP_WAIT_MS        3000u   /* 等待 STA 停稳 */
+
+static void net_sta_restart(void)
+{
+    (void)sys_wifi_sta_stop();
+    for (int i = 0; i < (int)(NET_STOP_WAIT_MS / 100); ++i) {
+        if (sys_wifi_sta_get_status() == STA_STATUS_STOP) {
+            break;
+        }
+        os_msleep(100);
+    }
+#if APP_WIFI_SCAN_DEBUG
+    /* 恢复路径同样必须预扫描：被 AP 踢线后 SDK 的"快速重连"会复用旧状态，
+     * 四次握手超时（reason 0x1000）；没有扫描的 network_start 也不会自己发起
+     * 扫描（见 docs/10-wifi-boot-sequencing.md 第 1 节）。 */
+    net_scan_debug();
+#endif
+    /* 清掉 NV 里的 PMKSA 缓存：上一次连接成功后直接烧录重启时，
+     * 过期缓存会让四次握手一直 MIC 失败（reason=15，看起来像密码错）。 */
+    (void)sys_wifi_pmk_cache_clean(WIFI_VIF_STA);
+    (void)net_wifi_connect();
+}
 
 static void net_task(void *arg)
 {
-    long long last_restart = 0;
+    long long last_restart;
     long long down_since = 0;
+    long long last_mqtt_ok = os_time_get();
 
     (void)arg;
     while (!sys_wifi_is_ready()) {
@@ -473,30 +518,97 @@ static void net_task(void *arg)
      * 由本应用用编译期凭据接管 STA。 */
     (void)sys_wifi_sta_set_auto_connect(false);
     (void)sys_wifi_sta_stop();
-    os_msleep(300);
+    for (int i = 0; i < (int)(NET_STOP_WAIT_MS / 100); ++i) {
+        if (sys_wifi_sta_get_status() == STA_STATUS_STOP) {
+            break;
+        }
+        os_msleep(100);
+    }
 
+#if APP_WIFI_SCAN_DEBUG
+    /* 连接前必须扫描：sta_stop 之后没有预扫描时 supplicant 完全不扫描
+     * （实测 100 秒零 wpa 日志）。详见 docs/10-wifi-boot-sequencing.md。 */
     net_scan_debug();
+#endif
+
+    /* 烧录后首次启动的握手失败（reason=15）多与 NV 里过期的 PMKSA 有关，
+     * 连接前先清一次缓存。 */
+    (void)sys_wifi_pmk_cache_clean(WIFI_VIF_STA);
 
     last_restart = os_time_get();
     (void)net_wifi_connect();
 
     for (;;) {
         long long now = os_time_get();
+        wifi_status_e st = sys_wifi_sta_get_status();
+        int may_restart = 0;
 
         if (s_sta_ip) {
+            static long long last_keepalive;
+            static unsigned keepalive_count;
+            static int sntp_configured;
+
             down_since = 0;
+            /* 每次拿到 IP 后把 SNTP 周期改为 30 秒：单播 UDP 校时请求
+             * 既能刷新热点对客户端的活跃计时（广播 ARP 对部分热点无效），
+             * 又能持续校准 telemetry 的 sent_at_ms。 */
+            if (!sntp_configured) {
+                int r = hal_sntp_period_set(30000u, HAL_SNTP_SYNC_NTP);
+                sntp_configured = 1;
+                os_printf(LL_INFO, "[net] sntp period 30s (ret=%d)\r\n", r);
+            }
+            /* 心跳：ARP 请求网关，刷新 AP 的客户端活跃计时器 */
+            if ((unsigned long long)(now - last_keepalive) >= NET_KEEPALIVE_MS) {
+                struct netif *nif = netif_default;
+
+                last_keepalive = now;
+                if (nif != NULL && !ip4_addr_isany_val(*netif_ip4_gw(nif))) {
+                    (void)etharp_request(nif, netif_ip4_gw(nif));
+                    if ((++keepalive_count % 4u) == 0u) {
+                        os_printf(LL_INFO, "[net] keepalive %u (arp gw)\r\n",
+                                  (unsigned)keepalive_count);
+                    }
+                }
+            }
+#if APP_UPLOAD_FORMAL
+            /* 静默掉线检测：AP 踢掉设备时 supplicant 可能收不到 deauth，
+             * s_sta_ip 一直为 1（实测热点列表已无客户端但 wifi=1）。
+             * 以 MQTT 连接作为"真的通"的判据：150 秒都没连上就强制
+             * 重新扫描关联，而不是一直等 SDK 自己发现。 */
+            if (mqtt_connected()) {
+                last_mqtt_ok = now;
+            } else if ((unsigned long long)(now - last_mqtt_ok) >= 150000u &&
+                       (unsigned long long)(now - last_restart) >= 150000u) {
+                os_printf(LL_WARN, "[net] no mqtt for 150s (wifi=%d), "
+                                   "restart sta\r\n", (int)s_sta_ip);
+                last_restart = now;
+                last_mqtt_ok = now;
+                net_sta_restart();
+                down_since = os_time_get();
+            }
+#endif
         } else {
             if (down_since == 0) {
                 down_since = now;
             }
-            /* SDK 会自行重连；只有 30 秒仍无 IP 才强制重启一次 STA */
-            if ((unsigned long long)(now - down_since) >= 30000u &&
-                (unsigned long long)(now - last_restart) >= 30000u) {
+            /* SDK 自带无限重连策略，正常情况下交给它；只有“彻底停下”
+             * （DISCON/STOP，即既不在关联也不在握手）才允许我们介入。 */
+            if (st == STA_STATUS_DISCON || st == STA_STATUS_STOP) {
+                may_restart = ((unsigned long long)(now - down_since) >=
+                                   NET_RESTART_QUIET_MS &&
+                               (unsigned long long)(now - last_restart) >=
+                                   NET_RESTART_QUIET_MS);
+            } else if ((unsigned long long)(now - down_since) >=
+                       NET_RESTART_HARD_MS) {
+                /* 关联/握手卡死超过 3 分钟才强杀，避免永久无网 */
+                may_restart = 1;
+            }
+            if (may_restart) {
                 last_restart = now;
-                os_printf(LL_WARN, "[net] no ip for 30s, restart sta\r\n");
-                (void)sys_wifi_sta_stop();
-                os_msleep(500);
-                (void)net_wifi_connect();
+                os_printf(LL_WARN, "[net] no ip for %us (status=%d), restart sta\r\n",
+                          (unsigned)((now - down_since) / 1000),
+                          (int)st);
+                net_sta_restart();
                 down_since = os_time_get();
             }
         }
